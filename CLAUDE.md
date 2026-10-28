@@ -17,6 +17,10 @@ wrong, stop and ask; do not invent behaviour.**
   `AIProvider`) with fakes in `tests/fakes.py`. Tests never touch the network.
 - Time zone `Asia/Hong_Kong`. Never use naive "today" outside one `clock` helper that tests can freeze.
 - No secrets in code, tests, fixtures, logs or committed files. Secrets come from Secret Manager.
+- The Gemini API key: in production from Secret Manager (`GEMINI_KEY_SECRET`); locally only from the
+  `GEMINI_API_KEY` environment variable in a git-ignored `.env`. Never ask the user to paste the key,
+  never print it, never write it to a file. Create `.gitignore` with `.env` in Phase 1.
+- Live Gemini calls may fail from Hong Kong ("location not supported"); tests use FakeAIProvider.
 - Never log message text, names, emails or phone numbers. Log task IDs, counts, timings, error types.
 - Test data is fake or masked. Never add real BRI messages, names or numbers to the repo.
 - A failure must never lose a request (DESIGN D15).
