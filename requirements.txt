@@ -1,0 +1,14 @@
+# Runtime
+pydantic>=2.7,<3                  # every data shape (CLAUDE.md)
+tzdata>=2024.1                    # zoneinfo data for Asia/Hong_Kong; python:3.12-slim has none
+fastapi>=0.110                    # HTTP routes (D1)
+uvicorn[standard]>=0.29           # ASGI server; also loads --env-file for local runs
+google-api-python-client>=2.100   # Sheets, Drive and Gmail APIs
+google-auth>=2.20                 # service account (ADC) and the Gmail OAuth refresh token
+google-cloud-secret-manager>=2.20 # Gmail refresh token and OAuth client secret (section 9)
+google-genai>=1.0                 # Gemini on Vertex AI (VertexGeminiProvider)
+# Tests and lint (CLAUDE.md commands install from this one file)
+pytest>=8
+ruff>=0.6
+httpx>=0.27                       # FastAPI TestClient
+cryptography>=42                  # signs test tokens in tests/test_auth.py
