@@ -52,3 +52,13 @@ def test_gmail_job_auth_error_is_500():
     response = client_with(runtime(gmail)).post("/jobs/gmail")
     assert response.status_code == 500
     assert response.json()["error"] == "gmail_auth_error"
+
+
+def test_changes_recurring_and_digest_endpoints():
+    rt = runtime()
+    client = client_with(rt)
+    changes = client.post("/jobs/changes").json()
+    assert changes["job"] == "changes" and changes["baseline"] is True
+    assert client.post("/jobs/recurring").json()["job"] == "recurring"
+    digest = client.post("/jobs/digest").json()
+    assert digest == {"job": "digest", "personal_sent": 0, "manager_sent": False, "failed": 0}

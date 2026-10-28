@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from app.drive import DriveStore, GoogleDriveStore
 from app.extract.ai import provider_from_config
 from app.gmail import GmailAuthError, GmailClient, GoogleGmailClient, process_inbox
+from app.jobs import run_changes, run_digest, run_recurring
 from app.pipeline import Services
 from app.settings import Settings, get_settings
 from app.sheets import GoogleSheetsBackend, SchemaError, SheetStore
@@ -80,3 +81,33 @@ def gmail_job(runtime: RuntimeDep) -> dict[str, object] | JSONResponse:
     except (SchemaError, GmailAuthError) as error:
         return _job_error("gmail", error)
     return {"job": "gmail", **run.model_dump()}
+
+
+@app.post("/jobs/changes", response_model=None)
+def changes_job(runtime: RuntimeDep) -> dict[str, object] | JSONResponse:
+    try:
+        runtime.store.load()
+        run = run_changes(runtime.store, runtime.gmail, runtime.settings.sheet_url)
+    except (SchemaError, GmailAuthError) as error:
+        return _job_error("changes", error)
+    return {"job": "changes", **run.model_dump()}
+
+
+@app.post("/jobs/recurring", response_model=None)
+def recurring_job(runtime: RuntimeDep) -> dict[str, object] | JSONResponse:
+    try:
+        runtime.store.load()
+        run = run_recurring(runtime.services())
+    except SchemaError as error:
+        return _job_error("recurring", error)
+    return {"job": "recurring", **run.model_dump()}
+
+
+@app.post("/jobs/digest", response_model=None)
+def digest_job(runtime: RuntimeDep) -> dict[str, object] | JSONResponse:
+    try:
+        runtime.store.load()
+        run = run_digest(runtime.store, runtime.gmail, runtime.settings.sheet_url)
+    except (SchemaError, GmailAuthError) as error:
+        return _job_error("digest", error)
+    return {"job": "digest", **run.model_dump()}
