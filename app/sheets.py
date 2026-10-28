@@ -300,22 +300,27 @@ class SheetStore:
     # Loading ---------------------------------------------------------------------------------
 
     def load(self) -> None:
-        """One batch read of every tab a job needs, then a schema check (raises SchemaError)."""
+        """One batch read of every tab a job needs, then a schema check (raises SchemaError).
+
+        All problems are reported at once (missing tabs and the columns missing from the tabs
+        that do exist), so the sheet can be fixed in one pass.
+        """
         titles = set(self._backend.sheet_titles())
-        needed = (*LOADED_TABS, "AuditLog")
-        missing_tabs = [tab for tab in needed if tab not in titles]
-        if missing_tabs:
-            raise SchemaError([f"missing tab {tab}" for tab in missing_tabs])
-        ranges = [quote_tab(tab) for tab in LOADED_TABS] + [quote_tab("AuditLog") + "!1:1"]
+        present = [tab for tab in LOADED_TABS if tab in titles]
+        ranges = [quote_tab(tab) for tab in present]
+        if "AuditLog" in titles:
+            ranges.append(quote_tab("AuditLog") + "!1:1")
         results = self._backend.get(ranges)
         self._tabs = {
             tab: TabData.from_values(tab, values)
-            for tab, values in zip(LOADED_TABS, results[:-1], strict=True)
+            for tab, values in zip(present, results[: len(present)], strict=True)
         }
-        self._audit_header = [str(cell).strip() for cell in (results[-1][0] if results[-1] else [])]
+        audit = results[len(present)] if "AuditLog" in titles else []
+        self._audit_header = [str(cell).strip() for cell in (audit[0] if audit else [])]
         self._config = None
         self._staff = None
-        self.check_schema()
+        missing_tabs = [tab for tab in (*LOADED_TABS, "AuditLog") if tab not in titles]
+        self.check_schema(missing_tabs)
 
     def invalidate(self) -> None:
         self._tabs = {}
@@ -327,15 +332,18 @@ class SheetStore:
             self.load()
         return self._tabs[name]
 
-    def check_schema(self) -> None:
-        problems = []
+    def check_schema(self, missing_tabs: list[str] | None = None) -> None:
+        problems = [f"missing tab {tab}" for tab in missing_tabs or []]
         headers = {name: tab.header for name, tab in self._tabs.items()}
-        headers["AuditLog"] = self._audit_header
+        if self._audit_header:
+            headers["AuditLog"] = self._audit_header
         for tab, required in REQUIRED_COLUMNS.items():
+            if tab not in headers and tab in (missing_tabs or []):
+                continue
             missing = [column for column in required if column not in headers.get(tab, [])]
             if missing:
                 problems.append(f"{tab} is missing column(s): {', '.join(missing)}")
-        if not problems:
+        if "Config" in self._tabs and not any("Config" in p for p in problems):
             settings = self._settings()
             missing = [name for name in REQUIRED_CONFIG_SETTINGS if name not in settings]
             if missing:

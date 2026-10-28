@@ -353,3 +353,19 @@ def test_update_task_keeps_cache_without_reload(store):
     gets = len([call for call in store.backend.calls if call[0] == "get"])
     assert store.task_by_source_id("msg-1").status == "In Progress"
     assert len([call for call in store.backend.calls if call[0] == "get"]) == gets
+
+
+def test_all_schema_problems_reported_at_once():
+    backend = FakeSheetsBackend.from_fixtures()
+    del backend.tabs["_state"]
+    del backend.tabs["_failures"]
+    backend.tabs["Master"][0] = [h for h in backend.tabs["Master"][0] if h != "Source ID"]
+    backend.tabs["Catalog"][0] = [h for h in backend.tabs["Catalog"][0] if h != "Known contacts"]
+    with pytest.raises(SchemaError) as error:
+        FakeSheetStore(backend).load()
+    assert error.value.problems == [
+        "missing tab _state",
+        "missing tab _failures",
+        "Master is missing column(s): Source ID",
+        "Catalog is missing column(s): Known contacts",
+    ]
