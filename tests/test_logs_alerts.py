@@ -128,10 +128,9 @@ def test_gmail_job_alerts_when_requests_give_up():
     from tests.fakes import FakeChatClient
 
     backend = FakeSheetsBackend.from_fixtures()
-    backend.tabs["_failures"].append(["msg-t1", 2, "OSError", ""])
+    backend.tabs["_failures"].append(["m1", 2, "OSError", ""])
     gmail = FakeGmailClient()
-    gmail.add("t1", "GRC/To log", body_text="x")
-    gmail.fail_reading = set()
+    gmail.add("m1", body_text="x")
     drive = FakeDriveStore(fail_upload="original.txt")
     runtime = Runtime(
         settings=Settings(), store=FakeSheetStore(backend), drive=drive, gmail=gmail,

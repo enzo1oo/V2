@@ -1,7 +1,13 @@
-"""Gmail intake: label poll, message parsing, label changes and sending (DESIGN D3, D4, D15).
+"""Gmail intake from the dedicated bot mailbox (DESIGN D3, D4, D15, D16; section 4 step 11).
 
-One intake mailbox, reached with an OAuth refresh token from Secret Manager. Labels change only
-after the row is written, so a crash at any point leaves the email labelled for the next run.
+The bot reads every unread message in its inbox:
+- an auto-reply, or a sender not in Config `Allowed senders` → label `GRC/Ignored`, marked read;
+- a reply in a thread that already produced a task → its text is added to that task's Notes,
+  label `GRC/Reply`, marked read and archived (so "thanks, noted" never becomes a task);
+- anything else → `process_request`; after the row is written the sender gets a reply in the
+  same thread, then the message is labelled `GRC/Logged`, marked read and archived.
+A failing message stays unread in the inbox and is retried; after 3 failures it gets
+`GRC/Failed` and is marked read (mark it unread to retry by hand).
 """
 
 from __future__ import annotations
@@ -20,9 +26,13 @@ from typing import Any, Protocol
 from pydantic import BaseModel, Field
 
 from app import clock
-from app.models import Attachment, FailureRow, RawRequest
-from app.pipeline import Services, process_request
+from app.extract.clean import strip_noise
+from app.models import Attachment, AuditEntry, FailureRow, OutgoingEmail, RawRequest
+from app.notify import acknowledgement_email
+from app.pipeline import SERVICE_USER, Services, process_request
 from app.sheets import SchemaError
+
+__all__ = ["GmailAuthError", "GmailClient", "GmailMessage", "OutgoingEmail", "process_inbox"]
 
 
 def _log_counts(run: BaseModel) -> dict[str, object]:
@@ -36,13 +46,19 @@ SCOPES = (
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/gmail.send",
 )
+LOGGED_LABEL = "GRC/Logged"
+IGNORED_LABEL = "GRC/Ignored"
+REPLY_LABEL = "GRC/Reply"
 FAILED_LABEL = "GRC/Failed"
+UNREAD, INBOX = "UNREAD", "INBOX"  # Gmail system labels
 MAX_FAILURES = 3
-THREADS_PER_RUN = 20
+MESSAGES_PER_RUN = 20
+REPLY_NOTE_CHARS = 500
+_AUTO_SENDERS = ("mailer-daemon@", "postmaster@", "no-reply@", "noreply@", "do-not-reply@")
 
 
 class GmailAuthError(Exception):
-    """The refresh token was rejected; the Gmail job stops and labels stay for the retry."""
+    """The refresh token was rejected; the Gmail job stops and messages stay unread."""
 
 
 class GmailMessage(BaseModel):
@@ -55,23 +71,32 @@ class GmailMessage(BaseModel):
     body_text: str = ""
     body_html: str = ""
     attachments: list[Attachment] = Field(default_factory=list)
-
-
-class OutgoingEmail(BaseModel):
-    to: list[str]
-    cc: list[str] = Field(default_factory=list)
-    subject: str
-    text: str
-    html: str
+    rfc_message_id: str = ""  # the Message-ID header, for In-Reply-To
+    references: str = ""
+    automatic: bool = False  # auto-reply, bounce or bulk mail
 
 
 class GmailClient(Protocol):
-    def labelled_threads(self, label: str, limit: int) -> list[str]: ...
+    def address(self) -> str:
+        """The bot mailbox's own address."""
+        ...
 
-    def newest_message(self, thread_id: str) -> GmailMessage: ...
+    def unread_inbox(self, limit: int) -> list[str]:
+        """IDs of unread inbox messages, oldest first."""
+        ...
 
-    def move_label(self, thread_id: str, remove: str, add: str) -> None:
-        """Remove label `remove` from the thread and add `add` (created if missing)."""
+    def get_message(self, message_id: str) -> GmailMessage: ...
+
+    def logged_message_ids(self, thread_id: str) -> list[str]:
+        """IDs of messages in the thread that carry the `GRC/Logged` label."""
+        ...
+
+    def modify(self, message_id: str, add: list[str], remove: list[str]) -> None:
+        """Change a message's labels by name (`UNREAD`, `INBOX` are Gmail's own)."""
+        ...
+
+    def reply(self, original: GmailMessage, email: OutgoingEmail, sender_name: str) -> None:
+        """Send `email` as a reply in `original`'s thread."""
         ...
 
     def send(self, email: OutgoingEmail, sender_name: str) -> None: ...
@@ -110,6 +135,17 @@ def _text(part: dict[str, Any]) -> str:
         return raw.decode(_charset(part), errors="replace")
     except LookupError:
         return raw.decode("utf-8", errors="replace")
+
+
+def is_automatic(headers: dict[str, str], sender_email: str) -> bool:
+    """Auto-replies, bounces and bulk mail (RFC 3834 and common vendor headers)."""
+    if headers.get("auto-submitted", "no").strip().lower() not in ("", "no"):
+        return True
+    if any(name in headers for name in ("x-autoreply", "x-autorespond", "x-auto-response")):
+        return True
+    if headers.get("precedence", "").strip().lower() in ("bulk", "junk", "list", "auto_reply"):
+        return True
+    return sender_email.startswith(_AUTO_SENDERS)
 
 
 def parse_message(
@@ -157,10 +193,19 @@ def parse_message(
         body_text=text,
         body_html=html,
         attachments=attachments,
+        rfc_message_id=headers.get("message-id", ""),
+        references=headers.get("references", ""),
+        automatic=is_automatic(headers, address.lower()),
     )
 
 
-def build_mime(email: OutgoingEmail, sender: str, sender_name: str) -> str:
+def build_mime(
+    email: OutgoingEmail,
+    sender: str,
+    sender_name: str,
+    in_reply_to: str = "",
+    references: str = "",
+) -> str:
     """Base64url `raw` for messages.send: plain text plus an HTML alternative."""
     message = EmailMessage()
     message["From"] = formataddr((sender_name, sender))
@@ -168,6 +213,9 @@ def build_mime(email: OutgoingEmail, sender: str, sender_name: str) -> str:
     if email.cc:
         message["Cc"] = ", ".join(email.cc)
     message["Subject"] = email.subject
+    if in_reply_to:
+        message["In-Reply-To"] = in_reply_to
+        message["References"] = f"{references} {in_reply_to}".strip()
     message.set_content(email.text)
     message.add_alternative(email.html, subtype="html")
     return base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
@@ -177,7 +225,7 @@ def build_mime(email: OutgoingEmail, sender: str, sender_name: str) -> str:
 
 
 class GoogleGmailClient:
-    """Gmail API v1 as the intake mailbox ("me"), one client per thread."""
+    """Gmail API v1 as the bot mailbox ("me"), one client per thread."""
 
     def __init__(self, credentials: Any):
         self._credentials = credentials
@@ -221,6 +269,8 @@ class GoogleGmailClient:
             raise GmailAuthError(type(error).__name__) from None
 
     def _label_id(self, name: str, create: bool) -> str | None:
+        if name in (UNREAD, INBOX):
+            return name
         if name not in self._label_ids:
             labels = self._execute(self._users().labels().list(userId="me")).get("labels", [])
             self._label_ids.update({label["name"]: label["id"] for label in labels})
@@ -229,22 +279,21 @@ class GoogleGmailClient:
             self._label_ids[name] = created["id"]
         return self._label_ids.get(name)
 
-    def labelled_threads(self, label: str, limit: int) -> list[str]:
-        label_id = self._label_id(label, create=False)
-        if label_id is None:
-            return []
-        response = self._execute(
-            self._users().threads().list(userId="me", labelIds=[label_id], maxResults=limit)
-        )
-        return [thread["id"] for thread in response.get("threads", [])]
+    def address(self) -> str:
+        if self._address is None:
+            profile = self._execute(self._users().getProfile(userId="me"))
+            self._address = profile["emailAddress"].lower()
+        return self._address
 
-    def newest_message(self, thread_id: str) -> GmailMessage:
-        thread = self._execute(
-            self._users().threads().get(userId="me", id=thread_id, format="minimal")
+    def unread_inbox(self, limit: int) -> list[str]:
+        response = self._execute(
+            self._users().messages().list(userId="me", labelIds=[INBOX, UNREAD], maxResults=limit)
         )
-        newest = max(thread["messages"], key=lambda m: int(m.get("internalDate", "0")))
+        return [item["id"] for item in reversed(response.get("messages", []))]
+
+    def get_message(self, message_id: str) -> GmailMessage:
         full = self._execute(
-            self._users().messages().get(userId="me", id=newest["id"], format="full")
+            self._users().messages().get(userId="me", id=message_id, format="full")
         )
         return parse_message(full, self._attachment)
 
@@ -257,17 +306,31 @@ class GoogleGmailClient:
         )
         return _b64(response["data"])
 
-    def move_label(self, thread_id: str, remove: str, add: str) -> None:
+    def logged_message_ids(self, thread_id: str) -> list[str]:
+        logged = self._label_id(LOGGED_LABEL, create=False)
+        if logged is None:
+            return []
+        thread = self._execute(
+            self._users().threads().get(userId="me", id=thread_id, format="minimal")
+        )
+        return [m["id"] for m in thread.get("messages", []) if logged in m.get("labelIds", [])]
+
+    def modify(self, message_id: str, add: list[str], remove: list[str]) -> None:
         body = {
-            "removeLabelIds": [i for i in [self._label_id(remove, create=False)] if i],
-            "addLabelIds": [self._label_id(add, create=True)],
+            "addLabelIds": [self._label_id(name, create=True) for name in add],
+            "removeLabelIds": [i for i in (self._label_id(n, create=False) for n in remove) if i],
         }
-        self._execute(self._users().threads().modify(userId="me", id=thread_id, body=body))
+        self._execute(self._users().messages().modify(userId="me", id=message_id, body=body))
+
+    def reply(self, original: GmailMessage, email: OutgoingEmail, sender_name: str) -> None:
+        raw = build_mime(
+            email, self.address(), sender_name, original.rfc_message_id, original.references
+        )
+        body = {"raw": raw, "threadId": original.thread_id}
+        self._execute(self._users().messages().send(userId="me", body=body))
 
     def send(self, email: OutgoingEmail, sender_name: str) -> None:
-        if self._address is None:
-            self._address = self._execute(self._users().getProfile(userId="me"))["emailAddress"]
-        raw = build_mime(email, self._address, sender_name)
+        raw = build_mime(email, self.address(), sender_name)
         self._execute(self._users().messages().send(userId="me", body={"raw": raw}))
 
 
@@ -275,11 +338,14 @@ class GoogleGmailClient:
 
 
 class InboxRun(BaseModel):
-    threads: int = 0
+    messages: int = 0
     created: int = 0
     duplicates: int = 0
+    ignored: int = 0
+    replies: int = 0
     failed: int = 0
     gave_up: int = 0
+    ack_failed: int = 0
 
 
 def _record_failure(services: Services, key: str, error: Exception) -> int:
@@ -295,25 +361,73 @@ def _record_failure(services: Services, key: str, error: Exception) -> int:
     return count
 
 
-def _move(gmail: GmailClient, thread_id: str, remove: str, add: str) -> None:
+def _modify(gmail: GmailClient, message_id: str, add: list[str], remove: list[str]) -> None:
+    """Label change that never stops the run; a failure is retried by the next run."""
     try:
-        gmail.move_label(thread_id, remove=remove, add=add)
+        gmail.modify(message_id, add, remove)
     except GmailAuthError:
         raise
     except Exception as error:
         logger.error("label_change_failed", extra={"error_type": type(error).__name__})
 
 
-def process_inbox(gmail: GmailClient, services: Services, limit: int = THREADS_PER_RUN) -> InboxRun:
-    """Log up to `limit` labelled threads. Stops on schema or Gmail auth errors (labels stay)."""
+def _note_reply(services: Services, message: GmailMessage, logged_ids: list[str]) -> None:
+    """Add a reply's text to the Notes of the task its thread produced."""
+    task = next((t for t in (services.store.task_by_source_id(i) for i in logged_ids) if t), None)
+    if task is None:
+        return
+    # Light clean only: drop the quoted chain but keep short replies such as "Terima kasih, noted".
+    text = " ".join(strip_noise(message.body_text).split()) or "(no text)"
+    if len(text) > REPLY_NOTE_CHARS:
+        text = text[: REPLY_NOTE_CHARS - 1] + "…"
+    line = f"Reply from {message.sender_email} on {message.received_at:%d %b %Y %H:%M}: {text}"
+    notes = f"{task.notes}\n{line}" if task.notes else line
+    services.store.update_task(task.id, {"Notes": notes})
+    try:
+        services.store.append_audit(
+            [
+                AuditEntry(
+                    timestamp=clock.now(),
+                    user=SERVICE_USER,
+                    task_id=task.id,
+                    action="Reply noted",
+                    field="Notes",
+                    reason="Email reply in the task's thread",
+                )
+            ]
+        )
+    except Exception as error:
+        logger.error(
+            "audit_write_failed", extra={"task_id": task.id, "error_type": type(error).__name__}
+        )
+
+
+def process_inbox(
+    gmail: GmailClient, services: Services, limit: int = MESSAGES_PER_RUN
+) -> InboxRun:
+    """Handle up to `limit` unread inbox messages. Stops on schema or Gmail auth errors, leaving
+    the remaining messages unread for the next run."""
     config = services.store.config()
+    bot = gmail.address()
     run = InboxRun()
-    for thread_id in gmail.labelled_threads(config.gmail_intake_label, limit):
-        run.threads += 1
-        key = thread_id
+    for message_id in gmail.unread_inbox(limit):
+        run.messages += 1
         try:
-            message = gmail.newest_message(thread_id)
-            key = message.id
+            message = gmail.get_message(message_id)
+            if (
+                message.automatic
+                or message.sender_email == bot
+                or not config.sender_allowed(message.sender_email)
+            ):
+                _modify(gmail, message.id, [IGNORED_LABEL], [UNREAD])
+                run.ignored += 1
+                continue
+            logged = [i for i in gmail.logged_message_ids(message.thread_id) if i != message.id]
+            if logged and services.store.task_by_source_id(message.id) is None:
+                _note_reply(services, message, logged)
+                _modify(gmail, message.id, [REPLY_LABEL], [UNREAD, INBOX])
+                run.replies += 1
+                continue
             raw = RawRequest(
                 source="Email",
                 source_id=message.id,
@@ -331,20 +445,29 @@ def process_inbox(gmail: GmailClient, services: Services, limit: int = THREADS_P
             raise
         except Exception as error:
             run.failed += 1
-            count = _record_failure(services, key, error)
+            count = _record_failure(services, message_id, error)
             logger.warning(
-                "request_failed",
-                extra={"error_type": type(error).__name__, "failures": count},
+                "request_failed", extra={"error_type": type(error).__name__, "failures": count}
             )
             if count >= MAX_FAILURES:
-                # Take it out of the intake label so it stops retrying; the alert goes out (s.11).
-                _move(gmail, thread_id, config.gmail_intake_label, FAILED_LABEL)
+                # Stop retrying it; it stays in the inbox for a person (alert, section 11).
+                _modify(gmail, message_id, [FAILED_LABEL], [UNREAD])
                 run.gave_up += 1
                 logger.error("request_gave_up", extra={"failures": count})
             continue
-        # Only now, with the row written, is the email marked as logged (D15). If this fails the
-        # next run finds the row by Source ID and tries the label again.
-        _move(gmail, thread_id, config.gmail_intake_label, config.gmail_done_label)
+        # Only now, with the row written: acknowledge in the thread, then label, read, archive
+        # (D15). If the label change fails, the next run finds the row by Source ID.
+        try:
+            gmail.reply(message, acknowledgement_email(result, message), config.sender_name)
+        except GmailAuthError:
+            raise
+        except Exception as error:
+            run.ack_failed += 1
+            logger.error(
+                "ack_failed",
+                extra={"task_id": result.task_id, "error_type": type(error).__name__},
+            )
+        _modify(gmail, message.id, [LOGGED_LABEL], [UNREAD, INBOX])
         if result.created:
             run.created += 1
         else:

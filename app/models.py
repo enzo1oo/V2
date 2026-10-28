@@ -62,6 +62,14 @@ class RawRequest(BaseModel):
     catalog_id: str | None = None
 
 
+class OutgoingEmail(BaseModel):
+    to: list[str]
+    cc: list[str] = Field(default_factory=list)
+    subject: str
+    text: str
+    html: str
+
+
 class Contact(BaseModel):
     name: str | None = None
     email: str | None = None
@@ -241,9 +249,10 @@ def _trim_words(text: str, limit: int) -> str:
 class AIResult(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid")
 
-    title_en: str
-    summary_en: str
-    deliverables: list[str] = Field(default_factory=list)
+    # The Gemini API ignores maxLength (DESIGN section 6); the validators below enforce it.
+    title_en: str = Field(json_schema_extra={"maxLength": 90})
+    summary_en: str = Field(json_schema_extra={"maxLength": 400})
+    deliverables: list[str] = Field(default_factory=list, json_schema_extra={"maxItems": 10})
     deadline: date | None = None
     deadline_quote: str | None = None
     requester_org: str | None = None
@@ -310,6 +319,9 @@ def _yes(value: object) -> bool:
     return isinstance(value, str) and value.strip().lower() in {"yes", "y", "true"}
 
 
+DEFAULT_AI_MODEL = "gemini-3.8-flash"
+
+
 class AppConfig(_SheetRow):
     """The Config tab (Setting → Value). New v1 settings have defaults; the rest are required."""
 
@@ -324,22 +336,42 @@ class AppConfig(_SheetRow):
     unknown_letter_code: str = Field(alias="Unknown letter code")
     manager_email: str = Field(alias="Manager email")
     allowed_email_domain: str = Field(alias="Allowed email domain")
-    gmail_intake_label: str = Field(alias="Gmail intake label")
+    # v1.2: the bot reads its whole inbox; the old intake label setting is ignored if present.
+    gmail_intake_label: str = Field(default="", alias="Gmail intake label")
     gmail_done_label: str = Field(alias="Gmail done label")
     recurring_lead_days: int = Field(alias="Recurring lead (days)")
     default_due_days: int = Field(alias="Default due (days)")
-    ai_provider: Literal["Vertex", "BRI agent", "Off"] = Field(default="Off", alias="AI provider")
-    ai_model: str = Field(default="", alias="AI model")
+    ai_provider: Literal["Gemini API key", "Vertex", "Off"] = Field(
+        default="Off", alias="AI provider"
+    )
+    ai_model: str = Field(default=DEFAULT_AI_MODEL, alias="AI model")
     ai_region: str = Field(default="", alias="AI region")
     sender_name: str = Field(default="GRC Tracker", alias="Sender name")
     mask_emails_for_ai: bool = Field(default=False, alias="Mask emails for AI")
     requester_domains: str = Field(default="", alias="Requester domains")
     known_requesters: list[str] = Field(default_factory=list, alias="Known requesters")
     builder_email: str = Field(default="", alias="Builder email")
+    allowed_senders: list[str] = Field(default_factory=list, alias="Allowed senders")
 
     _lists = field_validator("known_requesters", mode="before")(_split_list)
 
-    @field_validator("ai_provider", "sender_name", mode="before")
+    @field_validator("allowed_senders", mode="before")
+    @classmethod
+    def _senders(cls, value: object) -> object:
+        if isinstance(value, str):
+            parts = value.replace(";", ",").replace("\n", ",").split(",")
+            return [part.strip().lower() for part in parts if part.strip()]
+        return value if value is not None else []
+
+    def sender_allowed(self, email: str) -> bool:
+        """Exact address, or `@domain` for a whole domain (D16). Empty list: nobody."""
+        email = email.strip().lower()
+        if not email or "@" not in email:
+            return False
+        domain = "@" + email.rpartition("@")[2]
+        return any(entry in (email, domain) for entry in self.allowed_senders)
+
+    @field_validator("ai_provider", "ai_model", "sender_name", mode="before")
     @classmethod
     def _blank_uses_default(cls, value: object, info: ValidationInfo) -> object:
         if _blank_to_none(value) is None and info.field_name:

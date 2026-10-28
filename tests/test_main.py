@@ -39,12 +39,15 @@ def test_healthz_has_no_data():
 
 def test_gmail_job(fixture_text):
     gmail = FakeGmailClient()
-    gmail.add("t1", "GRC/To log", body_text=fixture_text("manpower_planning.txt"))
+    gmail.add("m1", body_text=fixture_text("manpower_planning.txt"))
+    gmail.add("m2", body_text="spam", sender_email="someone@elsewhere.example.net")
     response = client_with(runtime(gmail)).post("/jobs/gmail")
     assert response.status_code == 200
     assert response.json() == {
-        "job": "gmail", "threads": 1, "created": 1, "duplicates": 0, "failed": 0, "gave_up": 0,
+        "job": "gmail", "messages": 2, "created": 1, "duplicates": 0, "ignored": 1, "replies": 0,
+        "failed": 0, "gave_up": 0, "ack_failed": 0,
     }  # fmt: skip
+    assert len(gmail.replies) == 1
 
 
 def test_gmail_job_schema_error_is_500():
@@ -57,7 +60,7 @@ def test_gmail_job_schema_error_is_500():
 
 def test_gmail_job_auth_error_is_500():
     gmail = FakeGmailClient()
-    gmail.add("t1", "GRC/To log", body_text="x")
+    gmail.add("m1", body_text="x")
     gmail.auth_broken = True
     response = client_with(runtime(gmail)).post("/jobs/gmail")
     assert response.status_code == 500
