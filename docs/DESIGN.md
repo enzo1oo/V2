@@ -35,7 +35,7 @@ everyone. Every change is logged.
 | D5 | Sheets and Drive use the runtime service account (`grc-tracker-run`). Attachments go to a Shared Drive folder per task: `G-0012 – <title>`. |
 | D6 | AI goes through one interface, `AIProvider.extract(text, catalog) -> AIResult`, with three implementations: `VertexGeminiProvider`, `BriAgentProvider` (stub until the agent owner shares the API), `NullProvider`. Chosen by the Config setting `AI provider`. |
 | D7 | Google Chat app over HTTP to `POST /chat`; synchronous replies; Google-signed token verified on every call. **(v1.1)** This needs the Cloud Run service to allow unauthenticated invocation (`allUsers` invoker) with token checks done in the app; confirm the org policy allows it. |
-| D8 | Edits made by hand in the sheet are audited by a small Apps Script edit trigger (`apps_script/audit.gs`), because only Apps Script sees the editor's identity. The service writes its own actions to AuditLog. |
+| D8 | Edits made by hand in the sheet are audited by a small Apps Script edit trigger (`apps_script/audit.gs`), because only Apps Script sees the editor's identity. The service writes its own actions to AuditLog. **(v1.1)** An edit trigger cannot prevent an edit, only undo it: Status = Done without `Submitted date` and `Link` is set back to its previous value (`In Progress` after a multi-cell paste, whose old values Apps Script does not provide) and logged as `Blocked`. Multi-cell edits are audited cell by cell with the old value marked unavailable. |
 | D9 | Approvals and handoffs are detected by comparing `Master` with a hidden `_state` tab every 5 minutes. |
 | D10 | Timed jobs: Cloud Scheduler with OIDC tokens → `POST /jobs/*`. |
 | D11 | Time zone `Asia/Hong_Kong` everywhere. Dates are stored as real sheet dates. |
@@ -97,6 +97,7 @@ Existing: `Effort: Small/Medium/Large`, `Support share`, `Overload threshold`, `
 **New (v1.1):** `Requester domains` (`domain=Org` pairs separated by `;`, e.g.
 `bri.co.id=BRI; ojk.go.id=OJK`), `Known requesters` (comma-separated organisation names, e.g.
 `BRI, OJK, HKMA, Bank Indonesia`).
+**New (v1.1, Phase 7):** `Builder email` (optional; alert emails go to it and `Manager email`).
 
 ### _state (hidden, service only)
 `ID`, `Status`, `Owner`, `Doer`, `Notified doer`, `Notified at`.
@@ -397,6 +398,12 @@ Environment variables (IDs only): `GCP_PROJECT`, `GCP_REGION`, `SHEET_ID`, `SHAR
   `Source ID` and changes the label then. `/jobs/gmail` answers 500 with `schema_error` or
   `gmail_auth_error` when it stops.
 - **(v1.1)** Failure counts and the "once per hour" alert throttle are stored in `_failures`.
+- **(v1.1)** Alerts are emailed (from the intake mailbox) for `schema_error` and requests moved to
+  `GRC/Failed`, at most once an hour per kind; when the sheet itself is broken the throttle falls
+  back to memory. A Gmail auth failure cannot be emailed through the broken mailbox, so it, like
+  the others, also has a log-based Cloud Monitoring alert (README step 11).
+- **(v1.1)** Logs are JSON for Cloud Logging; only numbers and a whitelist of ID/error fields are
+  written (`app/logs.py`), so personal data cannot reach the logs by mistake.
 - Sheets quota errors (429) → exponential backoff, max 3 tries. Read each tab once per job run.
 
 ---
@@ -475,3 +482,5 @@ the right and widen the ranges before Master passes 2,000 rows.
 17. Change detection as one rule (open and Doer ≠ Notified doer) with retry; recurring requests
     carry their Catalog ID and skip the AI; digest details (section 8).
 18. Chat: deferred reply without an ID (ID by email); token-check details (sections 8, 9).
+19. Phase 7: `Builder email` setting, alert emails with throttle, whitelisted JSON logs,
+    Apps Script undo-and-log for Done without proof (D8, sections 3, 11).
