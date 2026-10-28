@@ -6,7 +6,7 @@ import re
 from datetime import date, datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 Status = Literal["Proposed", "Not Started", "In Progress", "On Hold", "Done", "Cancelled"]
 OPEN_STATUSES: frozenset[str] = frozenset({"Not Started", "In Progress", "On Hold"})
@@ -29,7 +29,9 @@ def _blank_to_none(value: object) -> object:
 
 
 class _SheetRow(BaseModel):
-    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+    """A row read from a tab. Blank cells arrive as "" and numbers in text columns become text."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore", coerce_numbers_to_str=True)
 
 
 # --- Intake -----------------------------------------------------------------------------------
@@ -81,6 +83,12 @@ class StaffMember(_SheetRow):
     weighted_open_load: float = Field(default=0.0, alias="Weighted open load")
 
     _blanks = field_validator("internship_end", mode="before")(_blank_to_none)
+
+    @field_validator("role", mode="before")
+    @classmethod
+    def _role_default(cls, value: object) -> object:
+        # The Role column is optional in the sheet; a blank role is ordinary staff.
+        return "Staff" if _blank_to_none(value) is None else value
 
     @field_validator("capacity", mode="before")
     @classmethod
@@ -251,3 +259,122 @@ class AIResult(BaseModel):
     def _two_sentences(cls, value: str) -> str:
         sentences = _SENTENCE_END.split(value.strip())
         return " ".join(sentences[:2])
+
+
+# --- Service tabs and Config -------------------------------------------------------------------
+
+
+class StateRow(_SheetRow):
+    """One `_state` row: what the service last saw and notified for a task."""
+
+    id: str = Field(alias="ID")
+    status: str = Field(default="", alias="Status")
+    owner: str = Field(default="", alias="Owner")
+    doer: str = Field(default="", alias="Doer")
+    notified_doer: str = Field(default="", alias="Notified doer")
+    notified_at: datetime | None = Field(default=None, alias="Notified at")
+
+    _dates = field_validator("notified_at", mode="before")(_blank_to_none)
+
+
+class FailureRow(_SheetRow):
+    """One `_failures` row: a failure counter (key = Source ID) or alert throttle (`alert:…`)."""
+
+    key: str = Field(alias="Key")
+    count: int = Field(default=0, alias="Count")
+    last_error: str = Field(default="", alias="Last error")
+    last_at: datetime | None = Field(default=None, alias="Last at")
+
+    _dates = field_validator("last_at", mode="before")(_blank_to_none)
+
+    @field_validator("count", mode="before")
+    @classmethod
+    def _count_default(cls, value: object) -> object:
+        return 0 if _blank_to_none(value) is None else value
+
+
+class AuditEntry(_SheetRow):
+    timestamp: datetime = Field(alias="Timestamp")
+    user: str = Field(alias="User")
+    task_id: str = Field(default="", alias="Task ID")
+    action: str = Field(alias="Action")
+    field: str = Field(default="", alias="Field")
+    old_value: str = Field(default="", alias="Old value")
+    new_value: str = Field(default="", alias="New value")
+    reason: str = Field(default="", alias="Reason")
+
+
+def _yes(value: object) -> bool:
+    return isinstance(value, str) and value.strip().lower() in {"yes", "y", "true"}
+
+
+class AppConfig(_SheetRow):
+    """The Config tab (Setting → Value). New v1 settings have defaults; the rest are required."""
+
+    effort_small: float = Field(alias="Effort: Small")
+    effort_medium: float = Field(alias="Effort: Medium")
+    effort_large: float = Field(alias="Effort: Large")
+    support_share: float = Field(alias="Support share")
+    overload_threshold: float = Field(alias="Overload threshold")
+    stale_after_days: int = Field(alias="Stale after (days)")
+    reminder_time: str = Field(alias="Reminder time")
+    leaving_warning_days: int = Field(alias="Leaving warning (days)")
+    unknown_letter_code: str = Field(alias="Unknown letter code")
+    manager_email: str = Field(alias="Manager email")
+    allowed_email_domain: str = Field(alias="Allowed email domain")
+    gmail_intake_label: str = Field(alias="Gmail intake label")
+    gmail_done_label: str = Field(alias="Gmail done label")
+    recurring_lead_days: int = Field(alias="Recurring lead (days)")
+    default_due_days: int = Field(alias="Default due (days)")
+    ai_provider: Literal["Vertex", "BRI agent", "Off"] = Field(default="Off", alias="AI provider")
+    ai_model: str = Field(default="", alias="AI model")
+    ai_region: str = Field(default="", alias="AI region")
+    sender_name: str = Field(default="GRC Tracker", alias="Sender name")
+    mask_emails_for_ai: bool = Field(default=False, alias="Mask emails for AI")
+    requester_domains: str = Field(default="", alias="Requester domains")
+    known_requesters: list[str] = Field(default_factory=list, alias="Known requesters")
+
+    _lists = field_validator("known_requesters", mode="before")(_split_list)
+
+    @field_validator("ai_provider", "sender_name", mode="before")
+    @classmethod
+    def _blank_uses_default(cls, value: object, info: ValidationInfo) -> object:
+        if _blank_to_none(value) is None and info.field_name:
+            return cls.model_fields[info.field_name].default
+        return value
+
+    @field_validator("reminder_time", mode="before")
+    @classmethod
+    def _time_text(cls, value: object) -> object:
+        # Sheets returns a time cell as a fraction of a day (09:00 -> 0.375).
+        if isinstance(value, int | float) and 0 <= value < 1:
+            minutes = round(value * 24 * 60)
+            return f"{minutes // 60:02d}:{minutes % 60:02d}"
+        return value
+
+    @field_validator("mask_emails_for_ai", mode="before")
+    @classmethod
+    def _yes_no(cls, value: object) -> object:
+        return value if isinstance(value, bool) else _yes(value)
+
+    def effort_weight(self, effort: str) -> float:
+        """Weight of an Effort value; blank or unknown counts as Medium (as the sheet formula)."""
+        return {"Small": self.effort_small, "Large": self.effort_large}.get(
+            effort.strip(), self.effort_medium
+        )
+
+
+REQUIRED_CONFIG_SETTINGS: tuple[str, ...] = tuple(
+    field.alias for field in AppConfig.model_fields.values() if field.alias and field.is_required()
+)
+
+REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
+    "Master": MASTER_REQUIRED_COLUMNS,
+    "Staff": tuple(f.alias for f in StaffMember.model_fields.values() if f.alias),
+    "Catalog": tuple(f.alias for f in CatalogEntry.model_fields.values() if f.alias),
+    "LetterCodes": ("Letter code", "Route to division"),
+    "AuditLog": tuple(f.alias for f in AuditEntry.model_fields.values() if f.alias),
+    "Config": ("Setting", "Value"),
+    "_state": tuple(f.alias for f in StateRow.model_fields.values() if f.alias),
+    "_failures": tuple(f.alias for f in FailureRow.model_fields.values() if f.alias),
+}
