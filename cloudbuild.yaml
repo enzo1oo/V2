@@ -1,1 +1,68 @@
-# Written in Phase 7.
+# Test, build, push and deploy grc-tracker (DESIGN section 10).
+#
+#   gcloud builds submit --config cloudbuild.yaml \
+#     --substitutions=_SHEET_ID=...,_SHARED_DRIVE_FOLDER_ID=...,_SERVICE_URL=...,_CHAT_PROJECT_NUMBER=...
+#
+# The first deploy has no URL yet: deploy once with _SERVICE_URL=pending, read the URL from
+# `gcloud run services describe`, then run the build again with the real URL (README step 9).
+substitutions:
+  _REGION: asia-east2
+  _REPO: grc
+  _SERVICE: grc-tracker
+  _RUNTIME_SA: grc-tracker-run
+  _SCHEDULER_SA: grc-tracker-scheduler
+  _SHEET_ID: ""
+  _SHARED_DRIVE_FOLDER_ID: ""
+  _GMAIL_TOKEN_SECRET: grc-gmail-refresh-token
+  _OAUTH_CLIENT_SECRET: grc-gmail-oauth-client
+  _SERVICE_URL: ""
+  _CHAT_PROJECT_NUMBER: ""
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  - id: test
+    name: python:3.12-slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        pip install -q -r requirements.txt &&
+        ruff check . && ruff format --check . &&
+        pytest -q
+
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${BUILD_ID}
+      - .
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args: [push, "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${BUILD_ID}"]
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${BUILD_ID}
+      - --region=${_REGION}
+      - --service-account=${_RUNTIME_SA}@${PROJECT_ID}.iam.gserviceaccount.com
+      - --max-instances=1
+      - --min-instances=0
+      # CPU stays allocated after a response, so slow Chat requests finish in the background.
+      - --no-cpu-throttling
+      - --memory=1Gi
+      - --timeout=300
+      # Chat cannot send an IAM token: the app itself verifies every Scheduler and Chat token.
+      - --allow-unauthenticated
+      - --set-env-vars=GCP_PROJECT=${PROJECT_ID},GCP_REGION=${_REGION},SHEET_ID=${_SHEET_ID},SHARED_DRIVE_FOLDER_ID=${_SHARED_DRIVE_FOLDER_ID},GMAIL_TOKEN_SECRET=${_GMAIL_TOKEN_SECRET},OAUTH_CLIENT_SECRET=${_OAUTH_CLIENT_SECRET},SCHEDULER_SA_EMAIL=${_SCHEDULER_SA}@${PROJECT_ID}.iam.gserviceaccount.com,SERVICE_URL=${_SERVICE_URL},CHAT_PROJECT_NUMBER=${_CHAT_PROJECT_NUMBER},TZ=Asia/Hong_Kong
+
+images:
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${BUILD_ID}
