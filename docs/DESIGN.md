@@ -274,6 +274,17 @@ open task. Record `Notified doer` and `Notified at` in `_state` so each assignme
 **(v1.1)** When `_state` is empty (first run after go-live) every task is recorded as it is and
 **nothing is sent**. After that, a task with no `_state` row (a row added by hand) is treated as
 coming from `Proposed`: if it is already open with a Doer, the Doer is emailed once.
+**(v1.1)** Both triggers reduce to one rule: an open task whose `Doer` differs from
+`Notified doer` gets the email. So a send that fails (Gmail error, or the Doer has no email in
+Staff) stays pending and is retried on the next run; a missing email also adds the flag
+`Assignment email not sent: doer has no email in Staff` once. `_state` is saved after every send,
+so a crash later in the run cannot send twice. Each send is written to AuditLog
+(`Assignment emailed`).
+
+**(v1.1) Recurring details.** A recurring request carries its Catalog ID, so routing rule 1 uses
+that row directly instead of keyword scoring (report names often lack their own keywords), and
+the AI is not called. Title: `<Report type> – <Mon yyyy>`. Due dates are taken in
+`[today, today + Recurring lead (days)]` inclusive, across month and year ends.
 
 ---
 
@@ -289,6 +300,10 @@ message** under a divider. Plain text plus simple HTML.
 **Manager digest:** awaiting approval, all overdue, people over the load threshold, interns leaving
 within `Leaving warning (days)` who are still default owners in the Catalog, count of
 `AI unavailable` flags in the last 24 h.
+**(v1.1)** "Personal" means tasks where the person is the `Doer`; open statuses only. The manager
+digest is also sent only when non-empty, to Config `Manager email` (skipped if blank). The
+"last 24 h" AI count uses `Start / received` on or after yesterday (the sheet keeps no creation
+time). Managers are left out of the load list.
 
 **Chat bot:**
 - Only users whose email ends with `@<Allowed email domain>`.
@@ -446,3 +461,5 @@ the right and widen the ranges before Master passes 2,000 rows.
 15. Drive folder renamed after the write; text written as text; sender in Contacts; quote check
     ignores whitespace and emphasis; audit/rename failures after the write do not fail the request.
 16. `GRC/Failed` replaces the intake label; label-change failures are retried by the next run.
+17. Change detection as one rule (open and Doer ≠ Notified doer) with retry; recurring requests
+    carry their Catalog ID and skip the AI; digest details (section 8).

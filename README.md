@@ -3,7 +3,7 @@
 GRC request intake and task assignment for BRI HK. The design (source of truth) is
 [`docs/DESIGN.md`](docs/DESIGN.md).
 
-Build status: **Phase 4** (Gmail intake, assignment email template, `/jobs/gmail`, `/healthz`).
+Build status: **Phase 5** (Gmail intake, change detection, recurring reports, digests).
 
 > **Do not deploy yet.** `/jobs/*` has no token check until Phase 6 (`app/auth.py`).
 
