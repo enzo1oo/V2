@@ -255,9 +255,64 @@ class FakeAIProvider:
         return self.result
 
 
+class FakeGmailClient:
+    """Intake mailbox in memory: threads with labels, newest message per thread, sent mail."""
+
+    def __init__(self) -> None:
+        from app.gmail import GmailMessage, OutgoingEmail
+
+        self.threads: dict[str, dict[str, Any]] = {}  # id -> {"labels": set, "message": msg}
+        self.sent: list[tuple[OutgoingEmail, str]] = []
+        self.fail_reading: set[str] = set()
+        self.fail_labelling = False
+        self.auth_broken = False
+        self._message_type = GmailMessage
+
+    def add(self, thread_id: str, label: str, **message: Any) -> None:
+        values = {
+            "id": f"msg-{thread_id}",
+            "thread_id": thread_id,
+            "received_at": datetime(2026, 10, 26, 10, 0),
+            **message,
+        }
+        self.threads[thread_id] = {"labels": {label}, "message": self._message_type(**values)}
+
+    def labels(self, thread_id: str) -> set[str]:
+        return self.threads[thread_id]["labels"]
+
+    def _check(self) -> None:
+        if self.auth_broken:
+            from app.gmail import GmailAuthError
+
+            raise GmailAuthError("RefreshError")
+
+    def labelled_threads(self, label: str, limit: int) -> list[str]:
+        self._check()
+        return [tid for tid, thread in self.threads.items() if label in thread["labels"]][:limit]
+
+    def newest_message(self, thread_id: str) -> Any:
+        self._check()
+        if thread_id in self.fail_reading:
+            raise OSError("cannot read")
+        return self.threads[thread_id]["message"]
+
+    def move_label(self, thread_id: str, remove: str, add: str) -> None:
+        self._check()
+        if self.fail_labelling:
+            raise OSError("cannot label")
+        labels = self.threads[thread_id]["labels"]
+        labels.discard(remove)
+        labels.add(add)
+
+    def send(self, email: Any, sender_name: str) -> None:
+        self._check()
+        self.sent.append((email, sender_name))
+
+
 __all__ = [
     "FakeAIProvider",
     "FakeDriveStore",
+    "FakeGmailClient",
     "FakeSheetStore",
     "FakeSheetsBackend",
     "NotConfigured",
