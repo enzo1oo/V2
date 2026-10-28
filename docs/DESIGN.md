@@ -313,6 +313,13 @@ time). Managers are left out of the load list.
   the Chat API into the task folder; on failure, ask the user to drop files in the Files link.
 - Must answer within 25 seconds: if processing exceeds that, reply "Logged as G-xxxx, details by
   email" and finish in the background (requires CPU always allocated, D1).
+- **(v1.1)** The bot waits up to 20 s (margin under the 25 s rule). If processing is still
+  running, the task ID does not exist yet (it is assigned when the row is written), so the quick
+  reply is "Received – I'm still logging it. You'll get the task ID and details by email.", and
+  the worker emails the sender the full reply (or a failure notice) when it finishes.
+- **(v1.1)** A blank `Allowed email domain` rejects everyone. Drive-file attachments cannot be
+  read by the service, so they always get the "drop the file in the Files link" reply. A Chat
+  retry of the same message is deduplicated by its message name (`Source ID`).
 
 ---
 
@@ -320,6 +327,10 @@ time). Managers are left out of the load list.
 
 - Verify on every request: Scheduler OIDC token (audience = service URL, email = scheduler SA);
   Chat bearer token (Google-signed for Chat, audience = project number). Reject everything else.
+  **(v1.1)** Rejections are `401 {"detail": "unauthorized"}` with the reason only in the log. An
+  unset `SERVICE_URL`, `SCHEDULER_SA_EMAIL` or `CHAT_PROJECT_NUMBER` rejects everything. Scheduler
+  jobs must set their OIDC audience to `SERVICE_URL` (the service root, not the job path); the Chat
+  app's authentication audience must be "Project number".
 - Secrets only from Secret Manager (Gmail refresh token, OAuth client secret, BRI agent credential).
   Nothing secret in code, the sheet, env files committed to git, or logs.
 - Least privilege: runtime SA (Sheets via sharing, Drive Shared Drive, Vertex, Secret accessor);
@@ -463,3 +474,4 @@ the right and widen the ranges before Master passes 2,000 rows.
 16. `GRC/Failed` replaces the intake label; label-change failures are retried by the next run.
 17. Change detection as one rule (open and Doer ≠ Notified doer) with retry; recurring requests
     carry their Catalog ID and skip the AI; digest details (section 8).
+18. Chat: deferred reply without an ID (ID by email); token-check details (sections 8, 9).

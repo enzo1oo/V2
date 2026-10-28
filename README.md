@@ -3,9 +3,8 @@
 GRC request intake and task assignment for BRI HK. The design (source of truth) is
 [`docs/DESIGN.md`](docs/DESIGN.md).
 
-Build status: **Phase 5** (Gmail intake, change detection, recurring reports, digests).
-
-> **Do not deploy yet.** `/jobs/*` has no token check until Phase 6 (`app/auth.py`).
+Build status: **Phase 6** (all endpoints built; every `/jobs/*` and `/chat` call is token-checked).
+Phase 7 adds the Dockerfile, Cloud Build, Apps Script audit and the IT setup checklist.
 
 ## Local development
 
