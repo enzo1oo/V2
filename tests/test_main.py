@@ -1,8 +1,15 @@
 from fastapi.testclient import TestClient
 
+from app.auth import require_chat, require_scheduler
 from app.main import Runtime, app, get_runtime
 from app.settings import Settings
-from tests.fakes import FakeDriveStore, FakeGmailClient, FakeSheetsBackend, FakeSheetStore
+from tests.fakes import (
+    FakeChatClient,
+    FakeDriveStore,
+    FakeGmailClient,
+    FakeSheetsBackend,
+    FakeSheetStore,
+)
 
 
 def runtime(gmail=None, backend=None):
@@ -11,11 +18,14 @@ def runtime(gmail=None, backend=None):
         store=FakeSheetStore(backend or FakeSheetsBackend.from_fixtures()),
         drive=FakeDriveStore(),
         gmail=gmail or FakeGmailClient(),
+        chat=FakeChatClient(),
     )
 
 
 def client_with(rt):
     app.dependency_overrides[get_runtime] = lambda: rt
+    app.dependency_overrides[require_scheduler] = lambda: None  # token checks: tests/test_auth.py
+    app.dependency_overrides[require_chat] = lambda: None
     return TestClient(app)
 
 
@@ -62,3 +72,23 @@ def test_changes_recurring_and_digest_endpoints():
     assert client.post("/jobs/recurring").json()["job"] == "recurring"
     digest = client.post("/jobs/digest").json()
     assert digest == {"job": "digest", "personal_sent": 0, "manager_sent": False, "failed": 0}
+
+
+def test_chat_endpoint(fixture_text):
+    import json
+
+    event = json.loads(fixture_text("chat_message.json"))
+    response = client_with(runtime()).post("/chat", json=event)
+    assert response.status_code == 200
+    assert response.json()["text"].startswith("Logged as G-0001")
+
+
+def test_chat_endpoint_when_sheet_is_broken(fixture_text):
+    import json
+
+    backend = FakeSheetsBackend.from_fixtures()
+    del backend.tabs["_state"]
+    event = json.loads(fixture_text("chat_message.json"))
+    response = client_with(runtime(backend=backend)).post("/chat", json=event)
+    assert response.status_code == 200
+    assert "not available" in response.json()["text"]

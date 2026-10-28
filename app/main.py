@@ -1,6 +1,7 @@
-"""FastAPI routes. Each job builds a fresh Runtime, so every run starts with one sheet read.
+"""FastAPI routes. Each call builds a fresh Runtime, so every run starts with one sheet read.
 
-Token checks on /jobs/* and /chat are added in Phase 6 (app/auth.py); do not deploy before that.
+/jobs/* needs a Cloud Scheduler OIDC token and /chat a Google Chat token (app/auth.py);
+/healthz is open and returns no data.
 """
 
 from __future__ import annotations
@@ -9,9 +10,12 @@ import logging
 from dataclasses import dataclass
 from typing import Annotated
 
-from fastapi import Depends, FastAPI
+from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
+from app.auth import require_chat, require_scheduler
+from app.chat import ChatClient, GoogleChatClient, handle_event
 from app.drive import DriveStore, GoogleDriveStore
 from app.extract.ai import provider_from_config
 from app.gmail import GmailAuthError, GmailClient, GoogleGmailClient, process_inbox
@@ -31,6 +35,7 @@ class Runtime:
     store: SheetStore
     drive: DriveStore
     gmail: GmailClient
+    chat: ChatClient
 
     def services(self) -> Services:
         config = self.store.config()
@@ -56,6 +61,7 @@ def get_runtime() -> Runtime:
         store=SheetStore(GoogleSheetsBackend(settings.sheet_id)),
         drive=GoogleDriveStore(settings.shared_drive_folder_id),
         gmail=_gmail_client,
+        chat=GoogleChatClient(),
     )
 
 
@@ -68,12 +74,15 @@ def _job_error(job: str, error: Exception) -> JSONResponse:
     return JSONResponse(status_code=500, content={"job": job, "error": kind})
 
 
+jobs = APIRouter(prefix="/jobs", dependencies=[Depends(require_scheduler)])
+
+
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/jobs/gmail", response_model=None)
+@jobs.post("/gmail", response_model=None)
 def gmail_job(runtime: RuntimeDep) -> dict[str, object] | JSONResponse:
     try:
         runtime.store.load()
@@ -83,7 +92,7 @@ def gmail_job(runtime: RuntimeDep) -> dict[str, object] | JSONResponse:
     return {"job": "gmail", **run.model_dump()}
 
 
-@app.post("/jobs/changes", response_model=None)
+@jobs.post("/changes", response_model=None)
 def changes_job(runtime: RuntimeDep) -> dict[str, object] | JSONResponse:
     try:
         runtime.store.load()
@@ -93,7 +102,7 @@ def changes_job(runtime: RuntimeDep) -> dict[str, object] | JSONResponse:
     return {"job": "changes", **run.model_dump()}
 
 
-@app.post("/jobs/recurring", response_model=None)
+@jobs.post("/recurring", response_model=None)
 def recurring_job(runtime: RuntimeDep) -> dict[str, object] | JSONResponse:
     try:
         runtime.store.load()
@@ -103,7 +112,7 @@ def recurring_job(runtime: RuntimeDep) -> dict[str, object] | JSONResponse:
     return {"job": "recurring", **run.model_dump()}
 
 
-@app.post("/jobs/digest", response_model=None)
+@jobs.post("/digest", response_model=None)
 def digest_job(runtime: RuntimeDep) -> dict[str, object] | JSONResponse:
     try:
         runtime.store.load()
@@ -111,3 +120,24 @@ def digest_job(runtime: RuntimeDep) -> dict[str, object] | JSONResponse:
     except (SchemaError, GmailAuthError) as error:
         return _job_error("digest", error)
     return {"job": "digest", **run.model_dump()}
+
+
+app.include_router(jobs)
+
+
+@app.post("/chat", dependencies=[Depends(require_chat)])
+async def chat_event(request: Request, runtime: RuntimeDep) -> dict[str, object]:
+    event = await request.json()
+    return await run_in_threadpool(_handle_chat, event, runtime)
+
+
+def _handle_chat(event: dict[str, object], runtime: Runtime) -> dict[str, object]:
+    try:
+        runtime.store.load()
+        return handle_event(event, runtime.services(), runtime.chat, runtime.gmail)
+    except (SchemaError, GmailAuthError) as error:
+        logger.error(
+            "schema_error" if isinstance(error, SchemaError) else "gmail_auth_error",
+            extra={"job": "chat"},
+        )
+        return {"text": "The GRC tracker is not available right now. Please email the request."}
