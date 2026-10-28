@@ -84,3 +84,70 @@ def assignment_email(task: Task, staff: list[StaffMember], sheet_url: str) -> Ou
         text="\n".join(text_lines),
         html=html,
     )
+
+
+# --- Digests -----------------------------------------------------------------------------------
+
+
+def task_line(task: Task) -> str:
+    who = f" – {task.doer}" if task.doer else ""
+    return f"{task.id} – {task.title} (due {_date(task)}, {task.status}){who}"
+
+
+def digest_email(
+    to: list[str], subject: str, intro: str, sections: list[tuple[str, list[str]]], sheet_url: str
+) -> OutgoingEmail:
+    """A digest with titled sections; empty sections are left out."""
+    sections = [(title, lines) for title, lines in sections if lines]
+    text = [intro, ""]
+    html = [f"<p>{escape(intro)}</p>"]
+    for title, lines in sections:
+        text += [f"{title} ({len(lines)})", *(f"  - {line}" for line in lines), ""]
+        html.append(f"<p><b>{escape(title)} ({len(lines)})</b></p><ul>")
+        html += [f"<li>{escape(line)}</li>" for line in lines]
+        html.append("</ul>")
+    text.append(f"Sheet: {sheet_url}")
+    html.append(f"<p><a href='{escape(sheet_url, quote=True)}'>Open the GRC sheet</a></p>")
+    return OutgoingEmail(to=to, subject=subject, text="\n".join(text), html="".join(html))
+
+
+def personal_digest(
+    person: StaffMember,
+    overdue: list[Task],
+    due_soon: list[Task],
+    stale: list[Task],
+    sheet_url: str,
+    today_label: str,
+) -> OutgoingEmail | None:
+    """None when there is nothing to report (no empty digests)."""
+    sections = [
+        ("Overdue", [task_line(task) for task in overdue]),
+        ("Due within 7 days", [task_line(task) for task in due_soon]),
+        ("In progress, not updated recently", [task_line(task) for task in stale]),
+    ]
+    if not any(lines for _, lines in sections):
+        return None
+    return digest_email(
+        [person.email.strip()],
+        f"[GRC] Your tasks – {today_label}",
+        f"Hi {person.name}, here are your GRC tasks that need attention.",
+        sections,
+        sheet_url,
+    )
+
+
+def manager_digest(
+    manager_email: str,
+    sections: list[tuple[str, list[str]]],
+    sheet_url: str,
+    today_label: str,
+) -> OutgoingEmail | None:
+    if not any(lines for _, lines in sections):
+        return None
+    return digest_email(
+        [manager_email],
+        f"[GRC] Manager digest – {today_label}",
+        "GRC tracker summary.",
+        sections,
+        sheet_url,
+    )
