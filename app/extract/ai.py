@@ -10,18 +10,20 @@ Logs carry provider, model, prompt version, latency and success only — never m
 from __future__ import annotations
 
 import logging
+import os
 import re
+import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from pydantic import ValidationError
 
-from app.models import AIResult, CatalogEntry
+from app.models import DEFAULT_AI_MODEL, AIResult, CatalogEntry
 
 logger = logging.getLogger("grc.ai")
 
@@ -35,7 +37,7 @@ _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ai")
 
 
 class NotConfigured(Exception):
-    """The provider cannot be used yet (e.g. the BRI agent API is not known)."""
+    """The provider cannot be used: no API key, or Vertex mode without project and region."""
 
 
 class AIProvider(Protocol):
@@ -67,42 +69,25 @@ def build_prompt(masked_text: str, catalog: list[CatalogEntry], attachment_names
     )
 
 
-# JSON Schema for the model's answer. `deadline` is an ISO date string; AIResult parses it.
-RESPONSE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "title_en": {"type": "string", "maxLength": 90},
-        "summary_en": {"type": "string"},
-        "deliverables": {"type": "array", "items": {"type": "string"}},
-        "deadline": {"type": ["string", "null"], "format": "date"},
-        "deadline_quote": {"type": ["string", "null"]},
-        "requester_org": {"type": ["string", "null"]},
-        "contacts": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": ["string", "null"]},
-                    "email": {"type": ["string", "null"]},
-                },
-                "required": ["name", "email"],
-            },
-        },
-        "catalog_id": {"type": "string"},
-        "language": {"type": "string", "enum": ["id", "en", "mixed"]},
-    },
-    "required": [
-        "title_en",
-        "summary_en",
-        "deliverables",
-        "deadline",
-        "deadline_quote",
-        "requester_org",
-        "contacts",
-        "catalog_id",
-        "language",
-    ],
-}
+def _inline_refs(schema: dict[str, Any]) -> dict[str, Any]:
+    """Replace `$ref`s with their `$defs`, so the API sees one self-contained schema."""
+    defs = schema.get("$defs", {})
+
+    def walk(node: Any) -> Any:
+        if isinstance(node, dict):
+            if "$ref" in node:
+                return walk(defs[node["$ref"].rsplit("/", 1)[-1]])
+            return {key: walk(value) for key, value in node.items() if key != "$defs"}
+        if isinstance(node, list):
+            return [walk(item) for item in node]
+        return node
+
+    return walk(schema)
+
+
+# The answer's JSON Schema, derived from AIResult (DESIGN section 6). The API does not enforce
+# maxLength, so AIResult's validators trim; model_validate_json checks everything else.
+RESPONSE_SCHEMA: dict[str, Any] = _inline_refs(AIResult.model_json_schema())
 
 
 # --- Providers ---------------------------------------------------------------------------------
@@ -120,74 +105,109 @@ class NullProvider:
         return None
 
 
-class BriAgentProvider:
-    """BRI's AI agent. A stub until the agent owner shares the endpoint, auth and payload."""
+class GeminiProvider:
+    """Gemini through the google-genai SDK (2.33): API-key mode or Vertex mode (DESIGN D6).
 
-    name = "BRI agent"
-
-    def __init__(self, model: str = ""):
-        self.model = model
-
-    def extract(
-        self, masked_text: str, catalog: list[CatalogEntry], attachment_names: list[str]
-    ) -> AIResult | None:
-        raise NotConfigured("BRI agent API details are not known yet")
-
-
-class VertexGeminiProvider:
-    """Gemini on Vertex AI through the google-genai SDK: temperature 0, schema-enforced JSON."""
-
-    name = "Vertex"
+    Uses the SDK's documented structured-output call, `client.interactions.create(...,
+    response_format={"type": "text", "mime_type": "application/json", "schema": ...})`, and
+    reads `interaction.output_text`. The SDK's own retries are switched off: `run_ai` owns the
+    timeout-and-one-retry policy. Requests are not stored on Google's side (`store=False`).
+    """
 
     def __init__(
-        self, project: str, region: str, model: str, client_factory: Callable[[], Any] | None = None
+        self,
+        mode: Literal["api_key", "vertex"],
+        model: str,
+        *,
+        api_key: Callable[[], str] | None = None,
+        project: str = "",
+        region: str = "",
+        client_factory: Callable[[], Any] | None = None,
     ):
-        self.project = project
-        self.region = region
-        self.model = model
+        self.mode = mode
+        self.name = "Gemini API key" if mode == "api_key" else "Vertex"
+        self.model = model or DEFAULT_AI_MODEL
+        self._api_key = api_key
+        self._project = project
+        self._region = region
         self._client_factory = client_factory
         self._client: Any = None
+        self._lock = threading.Lock()
 
     def _get_client(self) -> Any:
-        if self._client is None:
-            if self._client_factory is not None:
-                self._client = self._client_factory()
-            else:
-                from google import genai
-                from google.genai import types
-
-                self._client = genai.Client(
-                    vertexai=True,
-                    project=self.project,
-                    location=self.region,
-                    http_options=types.HttpOptions(timeout=int(TIMEOUT_SECONDS * 1000)),
+        with self._lock:
+            if self._client is None:
+                self._client = (
+                    self._client_factory() if self._client_factory else self._build_client()
                 )
-        return self._client
+            return self._client
+
+    def _build_client(self) -> Any:
+        from google import genai
+        from google.genai import types
+
+        http_options = types.HttpOptions(
+            timeout=int(TIMEOUT_SECONDS * 1000),
+            retry_options=types.HttpRetryOptions(attempts=1),
+        )
+        if self.mode == "vertex":
+            if not self._project or not self._region:
+                raise NotConfigured("Vertex mode needs GCP_PROJECT and Config 'AI region'")
+            return genai.Client(
+                vertexai=True,
+                project=self._project,
+                location=self._region,
+                http_options=http_options,
+            )
+        key = self._api_key() if self._api_key else ""
+        if not key:
+            raise NotConfigured("no Gemini API key")
+        return genai.Client(api_key=key, http_options=http_options)
 
     def extract(
         self, masked_text: str, catalog: list[CatalogEntry], attachment_names: list[str]
     ) -> AIResult | None:
-        from google.genai import types
-
-        response = self._get_client().models.generate_content(
+        interaction = self._get_client().interactions.create(
             model=self.model,
-            contents=build_prompt(masked_text, catalog, attachment_names),
-            config=types.GenerateContentConfig(
-                temperature=0,
-                response_mime_type="application/json",
-                response_json_schema=RESPONSE_SCHEMA,
-            ),
+            input=build_prompt(masked_text, catalog, attachment_names),
+            response_format={
+                "type": "text",
+                "mime_type": "application/json",
+                "schema": RESPONSE_SCHEMA,
+            },
+            generation_config={"temperature": 0},
+            store=False,
         )
-        if not response.text:
+        text = getattr(interaction, "output_text", None)
+        if not text:
             return None
-        return AIResult.model_validate_json(response.text)
+        return AIResult.model_validate_json(text)
 
 
-def provider_from_config(provider: str, model: str, region: str, project: str) -> AIProvider:
+def gemini_api_key(secret_name: str, project: str) -> Callable[[], str]:
+    """The key loader: GEMINI_API_KEY (local .env) first, else Secret Manager. Never logged."""
+
+    def load() -> str:
+        local = os.environ.get("GEMINI_API_KEY", "").strip()
+        if local:
+            return local
+        if not secret_name:
+            raise NotConfigured("GEMINI_KEY_SECRET is not set")
+        from app.settings import read_secret
+
+        return read_secret(secret_name, project).strip()
+
+    return load
+
+
+def provider_from_config(
+    provider: str, model: str, region: str, project: str, key_secret: str = ""
+) -> AIProvider:
+    """Config `AI provider` → provider. Switching mode is a Config change, not a code change."""
+    if provider == "Gemini API key":
+        return GeminiProvider("api_key", model, api_key=gemini_api_key(key_secret, project))
     if provider == "Vertex":
-        return VertexGeminiProvider(project=project, region=region, model=model)
-    if provider == "BRI agent":
-        return BriAgentProvider(model=model)
+        return GeminiProvider("vertex", model, project=project, region=region)
     return NullProvider()
 
 
@@ -222,6 +242,19 @@ def apply_guardrails(result: AIResult, original_text: str, catalog: list[Catalog
     return result.model_copy(update=updates) if updates else result
 
 
+def _status_code(error: Exception) -> int:
+    for attribute in ("status_code", "code"):
+        value = getattr(error, attribute, None)
+        if isinstance(value, int):
+            return value
+    return 0
+
+
+def _permanent(status: int) -> bool:
+    """4xx (bad key, location not supported, bad request) will not succeed on a retry."""
+    return 400 <= status < 500 and status not in (408, 429)
+
+
 def run_ai(
     provider: AIProvider,
     masked_text: str,
@@ -238,6 +271,7 @@ def run_ai(
     for attempt in range(1, tries + 1):
         started = time.monotonic()
         error_type = ""
+        status = 0
         result: AIResult | None = None
         try:
             future = _executor.submit(
@@ -252,6 +286,7 @@ def run_ai(
             error_type = "InvalidResponse"
         except Exception as error:  # any SDK/network error: the pipeline carries on with rules
             error_type = type(error).__name__
+            status = _status_code(error)
         latency_ms = round((time.monotonic() - started) * 1000)
         success = result is not None
         logger.info(
@@ -264,10 +299,11 @@ def run_ai(
                 "success": success,
                 "attempt": attempt,
                 "error_type": error_type,
+                "status": status,
             },
         )
         if success and result is not None:
             return AIOutcome(apply_guardrails(result, original_text, catalog))
-        if error_type == "NotConfigured":
+        if error_type == "NotConfigured" or _permanent(status):
             break
     return AIOutcome(None, [AI_UNAVAILABLE_FLAG])

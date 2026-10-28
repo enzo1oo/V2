@@ -53,7 +53,11 @@ class Runtime:
     def services(self) -> Services:
         config = self.store.config()
         ai = provider_from_config(
-            config.ai_provider, config.ai_model, config.ai_region, self.settings.gcp_project
+            config.ai_provider,
+            config.ai_model,
+            config.ai_region,
+            self.settings.gcp_project,
+            self.settings.gemini_key_secret,
         )
         return Services(store=self.store, drive=self.drive, ai=ai)
 

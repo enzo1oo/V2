@@ -115,7 +115,7 @@ def test_weight_formula_written(fixture_text):
 
 def test_valid_ai_result(fixture_text):
     ai = FakeAIProvider(VALID_AI)
-    services = make_services(ai, "Vertex")
+    services = make_services(ai, "Gemini API key")
     process_request(manpower(fixture_text), services)
     task = only_task(services)
     assert "Manpower Planning" in task.title
@@ -132,7 +132,7 @@ def test_valid_ai_result(fixture_text):
 
 def test_ai_deadline_with_bad_quote_is_dropped(fixture_text):
     bad = {**VALID_AI, "deadline": "2026-11-20", "deadline_quote": "20 November 2026"}
-    services = make_services(FakeAIProvider(bad), "Vertex")
+    services = make_services(FakeAIProvider(bad), "Gemini API key")
     process_request(email(fixture_text("no_date.txt")), services)
     task = only_task(services)
     assert task.due_date == date(2026, 11, 2)  # today + Default due (7 days)
@@ -142,7 +142,7 @@ def test_ai_deadline_with_bad_quote_is_dropped(fixture_text):
 def test_ai_deadline_used_when_rules_find_none(fixture_text):
     text = fixture_text("no_date.txt") + "\nKirim sebelum akhir bulan depan (30 Nov)."
     result = {**VALID_AI, "deadline": "2026-11-30", "deadline_quote": "akhir bulan depan (30 Nov)"}
-    services = make_services(FakeAIProvider(result), "Vertex")
+    services = make_services(FakeAIProvider(result), "Gemini API key")
     process_request(email(text), services)
     task = only_task(services)
     assert task.due_date == date(2026, 11, 30)
@@ -150,7 +150,7 @@ def test_ai_deadline_used_when_rules_find_none(fixture_text):
 
 def test_ai_deadline_differs_keeps_rule_date(fixture_text):
     other = {**VALID_AI, "deadline": "2026-11-05", "deadline_quote": "Rabu 06 November 2026"}
-    services = make_services(FakeAIProvider(other), "Vertex")
+    services = make_services(FakeAIProvider(other), "Gemini API key")
     process_request(manpower(fixture_text), services)
     task = only_task(services)
     assert task.due_date == date(2026, 11, 6)
@@ -160,7 +160,7 @@ def test_ai_deadline_differs_keeps_rule_date(fixture_text):
 def test_ai_timeout_continues_on_rules(fixture_text, monkeypatch):
     monkeypatch.setattr(ai_module, "TIMEOUT_SECONDS", 0.05)
     slow = FakeAIProvider(VALID_AI, delay=0.3)
-    services = make_services(slow, "Vertex")
+    services = make_services(slow, "Gemini API key")
     process_request(manpower(fixture_text), services)
     task = only_task(services)
     assert "AI unavailable" in task.flags
@@ -169,22 +169,35 @@ def test_ai_timeout_continues_on_rules(fixture_text, monkeypatch):
     assert task.due_date == date(2026, 11, 6)
 
 
-def test_bri_agent_stub_flags_ai_unavailable(fixture_text):
-    from app.extract.ai import BriAgentProvider
+def test_gemini_location_error_falls_back_to_rules(fixture_text):
+    from unittest.mock import MagicMock
 
-    services = make_services(BriAgentProvider(), "BRI agent")
-    process_request(manpower(fixture_text), services)
-    assert "AI unavailable" in only_task(services).flags
+    from app.extract.ai import GeminiProvider
+
+    class LocationError(Exception):
+        status_code = 400
+
+    client = MagicMock()
+    client.interactions.create.side_effect = LocationError("User location is not supported")
+    provider = GeminiProvider("api_key", "gemini-3.8-flash", client_factory=lambda: client)
+    services = make_services(provider, "Gemini API key")
+    result = process_request(manpower(fixture_text), services)
+    task = only_task(services)
+    assert result.created
+    assert "AI unavailable" in task.flags
+    assert task.title.startswith("Dalam rangka")  # rule title
+    assert task.due_date == date(2026, 11, 6)  # rule deadline
+    assert task.catalog_id == "HR-DATA"
 
 
 def test_ai_suggestion_drives_rule_4():
     suggestion = {**VALID_AI, "catalog_id": "FIN-KPMM", "deadline": None, "deadline_quote": None}
-    services = make_services(FakeAIProvider(suggestion), "Vertex")
+    services = make_services(FakeAIProvider(suggestion), "Gemini API key")
     process_request(email("Mohon dilengkapi lampiran terkait permodalan kuartal ini."), services)
     task = only_task(services)
     assert task.routing_note.startswith("Rule 1")  # "permodalan" is a FIN-KPMM keyword
 
-    services = make_services(FakeAIProvider(suggestion), "Vertex")
+    services = make_services(FakeAIProvider(suggestion), "Gemini API key")
     process_request(email("Mohon dilengkapi lampiran terlampir."), services)
     task = only_task(services)
     assert task.routing_note.startswith("Rule 4 (AI suggested)")
