@@ -1,3 +1,6 @@
-# Runtime dependencies. Google client libraries are added in the phase that first uses them.
-pydantic>=2.7,<3
-tzdata>=2024.1
+# Runtime
+pydantic>=2.7,<3   # every data shape (CLAUDE.md)
+tzdata>=2024.1     # zoneinfo data for Asia/Hong_Kong; python:3.12-slim has no system tz database
+# Tests and lint (CLAUDE.md commands install from this one file)
+pytest>=8
+ruff>=0.6
