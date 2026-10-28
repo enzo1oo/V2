@@ -366,6 +366,10 @@ Environment variables (IDs only): `GCP_PROJECT`, `GCP_REGION`, `SHEET_ID`, `SHAR
 - Gmail auth failure → stop the Gmail job, alert within 1 hour; labels stay for retry.
 - Any exception inside one request → log, add nothing to the sheet, leave the label, continue with
   the next request. After 3 failures for the same `source_id`, add the label `GRC/Failed` and alert.
+  **(v1.1)** `GRC/Failed` replaces the intake label (otherwise the job would retry it forever).
+  A failed label change after the row is written is logged; the next run finds the row by
+  `Source ID` and changes the label then. `/jobs/gmail` answers 500 with `schema_error` or
+  `gmail_auth_error` when it stops.
 - **(v1.1)** Failure counts and the "once per hour" alert throttle are stored in `_failures`.
 - Sheets quota errors (429) → exponential backoff, max 3 tries. Read each tab once per job run.
 
@@ -441,3 +445,4 @@ the right and widen the ranges before Master passes 2,000 rows.
 14. Unknown letter code flag, blank Role = Staff; sheet changes needed before go-live (sections 5, 14).
 15. Drive folder renamed after the write; text written as text; sender in Contacts; quote check
     ignores whitespace and emphasis; audit/rename failures after the write do not fail the request.
+16. `GRC/Failed` replaces the intake label; label-change failures are retried by the next run.

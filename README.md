@@ -3,7 +3,9 @@
 GRC request intake and task assignment for BRI HK. The design (source of truth) is
 [`docs/DESIGN.md`](docs/DESIGN.md).
 
-Build status: **Phase 3** (full pipeline with fakes; no Gmail, Chat or HTTP endpoints yet).
+Build status: **Phase 4** (Gmail intake, assignment email template, `/jobs/gmail`, `/healthz`).
+
+> **Do not deploy yet.** `/jobs/*` has no token check until Phase 6 (`app/auth.py`).
 
 ## Local development
 
@@ -16,4 +18,12 @@ python3.12 -m venv .venv
 
 Tests run with the clock frozen at Monday 26 Oct 2026 09:00 Asia/Hong_Kong (`tests/conftest.py`).
 
-Environment variables, the IT setup checklist and deploy steps are added in Phase 7.
+Local run against the **dev** sheet (env vars as in DESIGN section 10, in a `.env` that is never
+committed):
+
+```bash
+.venv/bin/uvicorn app.main:app --reload --env-file .env
+```
+
+The Gmail refresh token is minted once with `scripts/mint_gmail_token.py` (see its docstring) and
+stored in Secret Manager. The full IT setup checklist and deploy steps are added in Phase 7.
