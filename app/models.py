@@ -335,6 +335,7 @@ class AppConfig(_SheetRow):
     mask_emails_for_ai: bool = Field(default=False, alias="Mask emails for AI")
     requester_domains: str = Field(default="", alias="Requester domains")
     known_requesters: list[str] = Field(default_factory=list, alias="Known requesters")
+    builder_email: str = Field(default="", alias="Builder email")
 
     _lists = field_validator("known_requesters", mode="before")(_split_list)
 

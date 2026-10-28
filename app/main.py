@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -14,19 +16,30 @@ from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
+from app.alerts import send_alert
 from app.auth import require_chat, require_scheduler
 from app.chat import ChatClient, GoogleChatClient, handle_event
 from app.drive import DriveStore, GoogleDriveStore
 from app.extract.ai import provider_from_config
 from app.gmail import GmailAuthError, GmailClient, GoogleGmailClient, process_inbox
 from app.jobs import run_changes, run_digest, run_recurring
+from app.logs import setup_logging
 from app.pipeline import Services
 from app.settings import Settings, get_settings
 from app.sheets import GoogleSheetsBackend, SchemaError, SheetStore
 
 logger = logging.getLogger("grc.main")
 
-app = FastAPI(title="grc-tracker", docs_url=None, redoc_url=None, openapi_url=None)
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    setup_logging()
+    yield
+
+
+app = FastAPI(
+    title="grc-tracker", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan
+)
 
 
 @dataclass
@@ -68,9 +81,15 @@ def get_runtime() -> Runtime:
 RuntimeDep = Annotated[Runtime, Depends(get_runtime)]
 
 
-def _job_error(job: str, error: Exception) -> JSONResponse:
-    kind = "schema_error" if isinstance(error, SchemaError) else "gmail_auth_error"
-    logger.error(kind, extra={"job": job})
+def _job_error(job: str, error: Exception, runtime: Runtime) -> JSONResponse:
+    if isinstance(error, SchemaError):
+        logger.error("schema_error", extra={"job": job})
+        send_alert("schema_error", error.problems, runtime.gmail, runtime.store)
+        kind = "schema_error"
+    else:
+        # The mailbox itself is broken, so no email can go out: the log-based alert covers it.
+        logger.error("gmail_auth_error", extra={"job": job})
+        kind = "gmail_auth_error"
     return JSONResponse(status_code=500, content={"job": job, "error": kind})
 
 
@@ -88,7 +107,10 @@ def gmail_job(runtime: RuntimeDep) -> dict[str, object] | JSONResponse:
         runtime.store.load()
         run = process_inbox(runtime.gmail, runtime.services())
     except (SchemaError, GmailAuthError) as error:
-        return _job_error("gmail", error)
+        return _job_error("gmail", error, runtime)
+    if run.gave_up:
+        details = [f"{run.gave_up} request(s) moved to GRC/Failed in this run"]
+        send_alert("request_gave_up", details, runtime.gmail, runtime.store)
     return {"job": "gmail", **run.model_dump()}
 
 
@@ -98,7 +120,7 @@ def changes_job(runtime: RuntimeDep) -> dict[str, object] | JSONResponse:
         runtime.store.load()
         run = run_changes(runtime.store, runtime.gmail, runtime.settings.sheet_url)
     except (SchemaError, GmailAuthError) as error:
-        return _job_error("changes", error)
+        return _job_error("changes", error, runtime)
     return {"job": "changes", **run.model_dump()}
 
 
@@ -108,7 +130,7 @@ def recurring_job(runtime: RuntimeDep) -> dict[str, object] | JSONResponse:
         runtime.store.load()
         run = run_recurring(runtime.services())
     except SchemaError as error:
-        return _job_error("recurring", error)
+        return _job_error("recurring", error, runtime)
     return {"job": "recurring", **run.model_dump()}
 
 
@@ -118,7 +140,7 @@ def digest_job(runtime: RuntimeDep) -> dict[str, object] | JSONResponse:
         runtime.store.load()
         run = run_digest(runtime.store, runtime.gmail, runtime.settings.sheet_url)
     except (SchemaError, GmailAuthError) as error:
-        return _job_error("digest", error)
+        return _job_error("digest", error, runtime)
     return {"job": "digest", **run.model_dump()}
 
 
