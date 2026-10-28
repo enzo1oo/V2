@@ -3,7 +3,7 @@
 GRC request intake and task assignment for BRI HK. The design (source of truth) is
 [`docs/DESIGN.md`](docs/DESIGN.md).
 
-Build status: **Phase 1** (models, cleaning and rule extraction; no Google APIs yet).
+Build status: **Phase 2** (rules, sheet store and routing; tested against an in-memory sheet).
 
 ## Local development
 

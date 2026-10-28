@@ -202,6 +202,11 @@ on or after both today and the due date. **Load ratio** = Weighted open load ÷ 
    non-ADHOC Catalog ID: apply rules 1–2 to that row. Note starts `Rule 4 (AI suggested): …`.
 5. **Rule 5 — needs review.** No owner. Division if known. Flag `Needs review: no owner`.
 
+**(v1.1)** A letter code that is not in LetterCodes adds the flag
+`<Config "Unknown letter code">: unknown letter code <code>` (e.g.
+`Needs review: unknown letter code XYZ/ABC`); routing continues without a division from it.
+A blank `Role` counts as `Staff`. A name in Catalog that is not in Staff is unavailable.
+
 ---
 
 ## 6. AI extraction (`extract/ai.py`)
@@ -392,7 +397,22 @@ reading attachment contents, multi-mailbox intake.
 | Retention period | Not enforced in v1 |
 | Weekday/date conflict policy | Keep written date + flag (D13) |
 | Public invoker for `/chat` (D7) | IT to confirm org policy; otherwise Chat intake is blocked |
-| `Weighted open load` counts Proposed tasks? | Check in the xlsx (Phase 2); if not, bursts pile onto one person |
+| `Weighted open load` counts Proposed tasks? | Resolved: yes, the Staff formula counts every row that is not Done/Cancelled |
+
+### Sheet changes needed before go-live (found in `GRC_Tracker_Tabs_v2.xlsx`, Phase 2)
+
+The schema check stops every job until these exist:
+
+| Tab | Change |
+|---|---|
+| Master | Add columns `Original message`, `Files`, `AI summary`, `Deliverables`, `Contacts`, `Source ID`. Keep at least one data row with the `Weight` formula (it is copied to new rows). |
+| Catalog | Add column `Known contacts`. |
+| Staff | Fill `Role` (blank counts as Staff, so the manager is proposed until marked Manager), `Email`, and interns' `Internship end date`. |
+| Config | Add `AI provider`, `AI model`, `AI region`, `Sender name`, `Mask emails for AI`, `Requester domains`, `Known requesters` (all optional, defaults apply); fill `Manager email`, `Allowed email domain`. |
+| `_state`, `_failures` | Create both tabs (hidden) with the headers in section 3. |
+
+The Staff and Master formulas use column letters and rows `2:2000`; append new Master columns at
+the right and widen the ranges before Master passes 2,000 rows.
 
 ## 15. Changes in v1.1 (Phase 0 review)
 
@@ -409,3 +429,4 @@ reading attachment contents, multi-mailbox intake.
 11. Weight formula copied from the last data row (section 3).
 12. `AIResult` trims over-long title/summary instead of rejecting (section 6).
 13. `app/clock.py` added to the layout; fixtures use fake names (sections 9, 10, 12).
+14. Unknown letter code flag, blank Role = Staff; sheet changes needed before go-live (sections 5, 14).
