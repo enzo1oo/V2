@@ -170,10 +170,17 @@ RawRequest
 8. **Store files.** Create the task folder; save `original.txt` and every attachment; put the folder
    URL in `Files`. (A file over 25 MB: skip it and flag.) **(v1.1)** The folder carries the
    `Source ID` as a Drive app property; a retry reuses the existing folder instead of creating a
-   second one.
+   second one, and files already in it are not uploaded again. The ID is only known at step 10,
+   so the folder is created as `Pending – <title>` and renamed to `G-0012 – <title>` after the
+   row is written. The service uses the `drive.file` scope (it only touches what it created).
 9. **Route** (section 5) → `Owner`, `Doer` (= Owner), `Division`, `Catalog ID`, `Routing note`.
 10. **Write** the row (status `Proposed`, `Last updated` = now, `Weight` formula), then AuditLog
     `Created` with the routing note as the reason.
+    **(v1.1)** Every text value is written as text (leading `'`), so message content starting
+    with `=`, `+` or digits never becomes a formula or number. `Contacts` lists the forwarded
+    sender first, then the extracted contacts; the sender also counts as a known contact for
+    routing. Once the row exists, a failure to write AuditLog or rename the folder is logged and
+    alerted but does not fail the request (the row is the record; a retry would only dedupe).
 11. **Acknowledge.** Chat: reply (section 8). Email: change label to the Config `Gmail done label`
     (`GRC/Logged`) **after** step 10.
 
@@ -234,7 +241,9 @@ summary to its first two sentences) rather than rejecting the whole result.
   temperature 0, JSON output with the schema enforced.
 - `BriAgentProvider`: stub that raises `NotConfigured` until the endpoint, auth and payload format
   are known. Keep its interface identical.
-- Guardrails: drop `deadline` unless `deadline_quote` appears word-for-word in the original text;
+- Guardrails: drop `deadline` unless `deadline_quote` appears word-for-word in the original text
+  (**(v1.1)** compared ignoring case, line breaks, repeated spaces and `*`, because emails wrap
+  lines and the AI sees the cleaned text);
   `catalog_id` must exist; 20-second timeout, one retry, then return `None` (the pipeline continues
   on rules and flags `AI unavailable`).
 - Log provider, model, prompt version, latency, success. **Never log message text.**
@@ -430,3 +439,5 @@ the right and widen the ranges before Master passes 2,000 rows.
 12. `AIResult` trims over-long title/summary instead of rejecting (section 6).
 13. `app/clock.py` added to the layout; fixtures use fake names (sections 9, 10, 12).
 14. Unknown letter code flag, blank Role = Staff; sheet changes needed before go-live (sections 5, 14).
+15. Drive folder renamed after the write; text written as text; sender in Contacts; quote check
+    ignores whitespace and emphasis; audit/rename failures after the write do not fail the request.
