@@ -88,3 +88,49 @@ def test_correct_weekday(fixture_text):
     due = rules.due_date(light, TODAY)
     assert due.value == date(2026, 11, 6)
     assert due.flags == []
+
+
+# --- Phase 2: routing with the sheet fixtures ---------------------------------------------------
+
+
+def _route(fixture_text, name, store):
+    from app.route import route
+
+    _unwrapped, light, cleaned = _extract(fixture_text(name))
+    ref = rules.letter_ref(light)
+    due = rules.due_date(light, TODAY)
+    return route(
+        text=cleaned,
+        contacts=rules.contacts(light),
+        letter_code=ref.letter_code if ref else None,
+        due=due.value,
+        catalog=store.catalog(),
+        staff=store.staff(),
+        letter_codes=store.letter_codes(),
+        config=store.config(),
+        today=TODAY,
+    )
+
+
+def _store():
+    from tests.fakes import FakeSheetStore
+
+    store = FakeSheetStore()
+    store.load()
+    return store
+
+
+def test_manpower_routes_to_hr_data_by_known_contact(fixture_text):
+    result = _route(fixture_text, "manpower_planning.txt", _store())
+    assert (result.rule, result.catalog_id, result.division) == (1, "HR-DATA", "HR")
+    assert "Hana Setyaningsih" in result.note
+
+
+def test_letter_without_known_report_routes_by_division(fixture_text):
+    result = _route(fixture_text, "formal_letter_emr_irm.txt", _store())
+    assert (result.rule, result.division, result.catalog_id) == (3, "Policy and Risk", None)
+
+
+def test_printer_needs_review(fixture_text):
+    result = _route(fixture_text, "printer.txt", _store())
+    assert result.rule == 5 and result.owner is None
