@@ -58,6 +58,8 @@ class RawRequest(BaseModel):
     sender_email: str = ""
     attachments: list[Attachment] = Field(default_factory=list)
     submitted_by: str = ""
+    # Set only by the recurring job: the Catalog row the request is for (routing rule 1).
+    catalog_id: str | None = None
 
 
 class Contact(BaseModel):

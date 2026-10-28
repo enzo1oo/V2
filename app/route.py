@@ -163,8 +163,12 @@ def route(
     config: AppConfig,
     today: date,
     ai_catalog_id: str | None = None,
+    known_catalog_id: str | None = None,
 ) -> RouteResult:
-    """Propose an owner by rules 1-5 (DESIGN section 5)."""
+    """Propose an owner by rules 1-5 (DESIGN section 5).
+
+    `known_catalog_id` (recurring reports only) skips rule 1 scoring and uses that row.
+    """
     flags: list[str] = []
     reasons: list[str] = []
     division: str | None = None
@@ -184,7 +188,14 @@ def route(
             flags.append(f"{config.unknown_letter_code}: unknown letter code {letter_code}")
 
     # Rules 1 and 2: a known report.
-    match = score_catalog(text, contacts, catalog)
+    known = next(
+        (e for e in catalog if known_catalog_id and e.catalog_id == known_catalog_id), None
+    )
+    if known is not None and not known.is_adhoc:
+        # A recurring report already knows its Catalog row: rule 1 uses it directly.
+        match: CatalogMatch | None = CatalogMatch(known, 0, ("recurring",))
+    else:
+        match = score_catalog(text, contacts, catalog)
     matched_id = None
     if match is not None:
         result, failed = _catalog_rules(match, staff, today, due, config, "Rule {rule}")

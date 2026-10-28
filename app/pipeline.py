@@ -136,7 +136,8 @@ def process_request(raw: RawRequest, services: Services, today: date | None = No
     summary = ""
     deliverables: list[str] = []
     ai_catalog_id = None
-    if config.ai_provider != "Off":
+    # Recurring reports are generated from the Catalog, so there is nothing for the AI to read.
+    if config.ai_provider != "Off" and raw.source != "Recurring":
         catalog = store.catalog()
         outcome = run_ai(
             services.ai,
@@ -187,6 +188,7 @@ def process_request(raw: RawRequest, services: Services, today: date | None = No
         config=config,
         today=today,
         ai_catalog_id=ai_catalog_id,
+        known_catalog_id=raw.catalog_id,
     )
     flags.extend(routed.flags)
 

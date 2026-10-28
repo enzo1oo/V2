@@ -259,3 +259,14 @@ def test_owner_not_in_staff(sheet):
     result = run(sheet, "capex", staff=[person("Amy")], catalog=catalog)
     assert result.rule == 3
     assert "Ghost is not in Staff" in result.note
+
+
+def test_known_catalog_id_skips_scoring(sheet):
+    result = route(
+        text="Corporate governance report (Laporan Tata Kelola) – Oct 2026",
+        contacts=[], letter_code=None, due=DUE, catalog=sheet.catalog(), staff=sheet.staff(),
+        letter_codes=sheet.letter_codes(), config=sheet.config(), today=TODAY,
+        known_catalog_id="HR-DATA",
+    )  # fmt: skip
+    assert (result.rule, result.catalog_id) == (1, "HR-DATA")
+    assert "(recurring)" in result.note
