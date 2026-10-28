@@ -262,3 +262,82 @@ def test_refresh_error_becomes_gmail_auth_error():
     users.labels.return_value.list.return_value.execute.side_effect = RefreshError("invalid_grant")
     with pytest.raises(GmailAuthError):
         client.labelled_threads(INTAKE, 20)
+
+
+# --- Real MIME email with binary attachments, through the real client code ---------------------
+
+MINIMAL_PDF = (
+    b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+    b"2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
+    b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\n"
+    b"trailer<</Root 1 0 R>>\n%%EOF\n"
+)
+
+
+def _gmail_json_from_mime(mime_message, stored):
+    """MIME -> Gmail API `format=full` JSON; attachment bodies by attachmentId, like Gmail."""
+
+    def part(node):
+        out = {
+            "mimeType": node.get_content_type(),
+            "filename": node.get_filename() or "",
+            "headers": [{"name": k, "value": str(v)} for k, v in node.items()],
+        }
+        if node.is_multipart():
+            out["body"] = {"size": 0}
+            out["parts"] = [part(child) for child in node.iter_parts()]
+            return out
+        data = node.get_payload(decode=True) or b""
+        if out["filename"]:
+            key = f"att-{len(stored) + 1}"
+            stored[key] = data
+            out["body"] = {"attachmentId": key, "size": len(data)}
+        else:
+            out["body"] = {"data": b64(data), "size": len(data)}
+        return out
+
+    return {"id": "m-mime", "threadId": "t-mime", "internalDate": "1793000000000",
+            "payload": part(mime_message)}  # fmt: skip
+
+
+def test_binary_attachments_arrive_byte_identical(fixture_text):
+    import os
+    from email.message import EmailMessage
+    from unittest.mock import MagicMock
+
+    files = {
+        "Laporan Q3 – Ringkasan ✓.pdf": ("application/pdf", MINIMAL_PDF),
+        "data.bin": ("application/octet-stream", os.urandom(50_000)),
+    }
+    mail = EmailMessage()
+    mail["From"] = "GRC Manager <grc-manager@example.com>"
+    mail["Subject"] = "Fwd: Manpower Planning"
+    mail.set_content(fixture_text("manpower_planning.txt"))
+    for name, (mime, data) in files.items():
+        maintype, subtype = mime.split("/")
+        mail.add_attachment(data, maintype=maintype, subtype=subtype, filename=name)
+    stored: dict[str, bytes] = {}
+    api_message = _gmail_json_from_mime(mail, stored)
+
+    client, users = google_client()
+    users.threads.return_value.list.return_value.execute.return_value = {"threads": [{"id": "t"}]}
+    users.threads.return_value.get.return_value.execute.return_value = {
+        "messages": [{"id": "m-mime", "internalDate": "1"}]
+    }
+    users.messages.return_value.get.return_value.execute.return_value = api_message
+
+    def attachment(userId, messageId, id):
+        request = MagicMock()
+        request.execute.return_value = {"data": b64(stored[id])}
+        return request
+
+    users.messages.return_value.attachments.return_value.get.side_effect = attachment
+    svc = services()
+    run = process_inbox(client, svc)
+    assert run.created == 1
+    saved = svc.drive.only_folder()["files"]
+    for name, (_, data) in files.items():
+        assert saved[name] == data
+    assert saved["Laporan Q3 – Ringkasan ✓.pdf"].startswith(b"%PDF-1.4")
+    [task] = g_tasks(svc)
+    assert task.original_message == fixture_text("manpower_planning.txt")
