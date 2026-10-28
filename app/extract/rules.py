@@ -308,10 +308,16 @@ def title_rule(cleaned_text: str) -> str:
         while lines and (not lines[0].strip() or _LETTER_HEADER_LINE.match(lines[0])):
             lines.pop(0)
         sentence = first_sentence("\n".join(lines)).rstrip(".")
-    sentence = sentence[:1].upper() + sentence[1:]
-    if len(sentence) <= _TITLE_MAX:
-        return sentence
-    cut = sentence[: _TITLE_MAX - 1]
+    return cap_title(sentence)
+
+
+def cap_title(text: str) -> str:
+    """One line, first letter capitalised, at most 90 characters cut at a word boundary."""
+    text = re.sub(r"\s+", " ", text).strip()
+    text = text[:1].upper() + text[1:]
+    if len(text) <= _TITLE_MAX:
+        return text
+    cut = text[: _TITLE_MAX - 1]
     if " " in cut:
         cut = cut[: cut.rfind(" ")]
     return cut.rstrip(" ,;:-") + "…"

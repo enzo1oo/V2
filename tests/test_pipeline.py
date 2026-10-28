@@ -311,3 +311,10 @@ def test_empty_message_title_falls_back_to_subject():
     services = make_services()
     process_request(email("", subject="FW: RE: Data request"), services)
     assert only_task(services).title == "Data request"
+
+
+def test_subject_fallback_title_is_capped():
+    services = make_services()
+    process_request(email("", subject="Fwd: " + "Permintaan data " * 20), services)
+    title = only_task(services).title
+    assert len(title) <= 90 and title.endswith("…")

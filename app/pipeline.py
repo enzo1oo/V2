@@ -124,7 +124,7 @@ def process_request(raw: RawRequest, services: Services, today: date | None = No
     contacts = _unique_contacts(contacts)
     title = rules.title_rule(cleaned) if cleaned else ""
     if not title:
-        title = _strip_subject(unwrapped.subject or raw.subject) or "(no text)"
+        title = rules.cap_title(_strip_subject(unwrapped.subject or raw.subject)) or "(no text)"
     requester = rules.requester_org(
         unwrapped.sender_email if unwrapped.forwarded else "",
         light,

@@ -275,3 +275,8 @@ def test_requester_org_from_text_earliest_whole_word():
     text = "Permintaan OJK terkait BRI Group"
     assert rules.requester_org("x@gmail.com", text, {}, ["BRI", "OJK"]) == "OJK"
     assert rules.requester_org("x@gmail.com", "BRIGHT idea", {}, ["BRI"]) is None
+
+
+def test_cap_title():
+    assert rules.cap_title("  data\n request ") == "Data request"
+    assert len(rules.cap_title("x" * 200)) == 90
