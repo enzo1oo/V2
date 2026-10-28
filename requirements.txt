@@ -1,0 +1,3 @@
+# Runtime dependencies. Google client libraries are added in the phase that first uses them.
+pydantic>=2.7,<3
+tzdata>=2024.1

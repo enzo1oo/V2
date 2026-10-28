@@ -1,0 +1,25 @@
+from collections.abc import Iterator
+from datetime import date, datetime
+from pathlib import Path
+
+import pytest
+
+from app import clock
+
+FIXTURES = Path(__file__).parent / "fixtures"
+TODAY = date(2026, 10, 26)
+
+
+@pytest.fixture(autouse=True)
+def frozen_clock() -> Iterator[None]:
+    """Every test runs on Monday 26 Oct 2026, 09:00 Asia/Hong_Kong."""
+    with clock.freeze(datetime(2026, 10, 26, 9, 0)):
+        yield
+
+
+@pytest.fixture
+def fixture_text():
+    def load(name: str) -> str:
+        return (FIXTURES / name).read_text(encoding="utf-8")
+
+    return load
