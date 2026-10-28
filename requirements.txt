@@ -3,6 +3,7 @@ pydantic>=2.7,<3                  # every data shape (CLAUDE.md)
 tzdata>=2024.1                    # zoneinfo data for Asia/Hong_Kong; python:3.12-slim has none
 google-api-python-client>=2.100   # Sheets API v4 (later also Drive, Gmail, Chat)
 google-auth>=2.20                 # runtime service account credentials (ADC)
+google-genai>=1.0                 # Gemini on Vertex AI (VertexGeminiProvider)
 # Tests and lint (CLAUDE.md commands install from this one file)
 pytest>=8
 ruff>=0.6

@@ -181,3 +181,14 @@ def test_mask_manpower_phones(fixture_text):
     assert "0812" not in masked and "0811" not in masked
     assert masked.count("[phone]") == 2
     assert "06" in masked and "November 2026" in masked
+
+
+def test_html_to_text():
+    from app.extract.clean import html_to_text
+
+    html = (
+        "<html><head><style>p{}</style></head><body><p>Dear team,</p>"
+        "<p>Please send <b>A</b>&amp;B by 6 Nov.</p><ul><li>one</li><li>two</li></ul>"
+        "<script>x()</script></body></html>"
+    )
+    assert html_to_text(html) == "Dear team,\n\nPlease send A&B by 6 Nov.\n\n- one\n\n- two"

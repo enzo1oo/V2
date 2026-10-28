@@ -8,6 +8,9 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from app.drive import Folder, folder_url
+from app.extract.ai import NotConfigured
+from app.models import AIResult, CatalogEntry
 from app.sheets import SheetStore, column_letter
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -187,4 +190,76 @@ class FakeSheetStore(SheetStore):
         super().__init__(self.backend)
 
 
-__all__ = ["FakeSheetStore", "FakeSheetsBackend", "column_letter"]
+class FakeDriveStore:
+    """In-memory Shared Drive: folders keyed by Source ID, files by name."""
+
+    def __init__(self, fail_upload: str | None = None):
+        self.folders: dict[str, dict[str, Any]] = {}  # folder id -> {name, source_id, files}
+        self.fail_upload = fail_upload
+
+    def task_folder(self, source_id: str, name: str) -> Folder:
+        for folder_id, folder in self.folders.items():
+            if folder["source_id"] == source_id:
+                return Folder(folder_id, folder_url(folder_id))
+        folder_id = f"folder-{len(self.folders) + 1}"
+        self.folders[folder_id] = {"name": name, "source_id": source_id, "files": {}}
+        return Folder(folder_id, folder_url(folder_id))
+
+    def rename_folder(self, folder_id: str, name: str) -> None:
+        self.folders[folder_id]["name"] = name
+
+    def file_names(self, folder_id: str) -> set[str]:
+        return set(self.folders[folder_id]["files"])
+
+    def upload(self, folder_id: str, filename: str, mime: str, data: bytes) -> None:
+        if filename == self.fail_upload:
+            raise OSError("upload failed")
+        self.folders[folder_id]["files"][filename] = data
+
+    def only_folder(self) -> dict[str, Any]:
+        [folder] = self.folders.values()
+        return folder
+
+
+class FakeAIProvider:
+    """Returns a fixed AIResult (or raises / sleeps) and records what it was given."""
+
+    name = "Fake"
+    model = "fake-model"
+
+    def __init__(
+        self,
+        result: AIResult | dict[str, Any] | None = None,
+        error: Exception | None = None,
+        delay: float = 0.0,
+    ):
+        if isinstance(result, dict):
+            result = AIResult.model_validate_json(json.dumps(result, default=str))
+        self.result = result
+        self.error = error
+        self.delay = delay
+        self.calls: list[dict[str, Any]] = []
+
+    def extract(
+        self, masked_text: str, catalog: list[CatalogEntry], attachment_names: list[str]
+    ) -> AIResult | None:
+        import time
+
+        self.calls.append(
+            {"text": masked_text, "catalog": catalog, "attachments": attachment_names}
+        )
+        if self.delay:
+            time.sleep(self.delay)
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+__all__ = [
+    "FakeAIProvider",
+    "FakeDriveStore",
+    "FakeSheetStore",
+    "FakeSheetsBackend",
+    "NotConfigured",
+    "column_letter",
+]

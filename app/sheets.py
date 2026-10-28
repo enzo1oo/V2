@@ -428,17 +428,18 @@ class SheetStore:
                 return Formula(shift_formula_row(cell, offset + 2, new_row))
         raise SchemaError(["Master needs at least one data row with the Weight formula to copy"])
 
-    def append_task(self, task: Task) -> Task:
+    def append_task(self, task: Task) -> tuple[Task, bool]:
         """Write `task` as a new Master row with the next ID and the Weight formula.
 
-        If a row with the same Source ID already exists it is returned and nothing is written.
+        Returns (task as saved, True). If a row with the same Source ID already exists, returns
+        (that row, False) and writes nothing.
         """
         with self._lock:
             master = self._fresh_master()
             if task.source_id:
                 for _, record in master.records():
                     if str(record.get("Source ID", "")) == task.source_id:
-                        return Task.model_validate(record)
+                        return Task.model_validate(record), False
             new_row = master.last_row_number() + 1
             saved = task.model_copy(update={"id": self._next_id(master)})
             values = saved.model_dump(by_alias=True)
@@ -448,7 +449,7 @@ class SheetStore:
                 [(f"{quote_tab(MASTER)}!A{new_row}:{last_col}{new_row}", [master.encode(values)])]
             )
             self._after_append(saved)
-            return saved
+            return saved, True
 
     def _after_append(self, task: Task) -> None:
         """Keep the cache usable for the rest of the job without another read."""

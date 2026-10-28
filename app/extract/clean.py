@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from html.parser import HTMLParser
 
 # --- Forward unwrapping ------------------------------------------------------------------------
 
@@ -205,3 +206,42 @@ def mask_text(text: str, mask_emails: bool = False) -> str:
     text = _KTP.sub("[id]", text)
     text = _PHONE.sub(_mask_phone, text)
     return _ACCOUNT.sub("[account]", text)
+
+
+# --- HTML --------------------------------------------------------------------------------------
+
+_BLOCK_TAGS = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "table", "ul"}
+
+
+class _TextExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self._skip = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in {"script", "style", "head"}:
+            self._skip += 1
+        elif tag in _BLOCK_TAGS:
+            self.parts.append("\n")
+        if tag == "li":
+            self.parts.append("- ")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"script", "style", "head"}:
+            self._skip = max(0, self._skip - 1)
+        elif tag in _BLOCK_TAGS:
+            self.parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if not self._skip:
+            self.parts.append(data)
+
+
+def html_to_text(html: str) -> str:
+    """Plain text of an HTML email body (used only when the email has no text part)."""
+    parser = _TextExtractor()
+    parser.feed(html)
+    parser.close()
+    lines = [re.sub(r"[ \t ]+", " ", line).strip() for line in "".join(parser.parts).split("\n")]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()

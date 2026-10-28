@@ -180,7 +180,8 @@ def _task(**overrides) -> Task:
 
 
 def test_append_task_first_id_weight_formula_and_escaping(store):
-    saved = store.append_task(_task())
+    saved, created = store.append_task(_task())
+    assert created
     assert saved.id == "G-0001"
     backend = store.backend
     assert backend.raw("Master", 3, "ID") == "'G-0001"
@@ -201,14 +202,15 @@ def test_append_task_next_id_uses_highest(store):
     store.append_task(_task())
     master = store.backend.tabs["Master"]
     master[2][master[0].index("ID")] = "'G-0041"
-    second = store.append_task(_task(source_id="msg-2"))
+    second, _ = store.append_task(_task(source_id="msg-2"))
     assert second.id == "G-0042"
 
 
 def test_append_task_duplicate_source_id_writes_nothing(store):
-    first = store.append_task(_task())
+    first, _ = store.append_task(_task())
     rows_before = len(store.backend.tabs["Master"])
-    again = store.append_task(_task(title="Other"))
+    again, created = store.append_task(_task(title="Other"))
+    assert not created
     assert again.id == first.id
     assert len(store.backend.tabs["Master"]) == rows_before
 
@@ -231,7 +233,7 @@ def test_append_task_updates_cached_load_and_tasks(store):
 
 
 def test_update_task(store):
-    saved = store.append_task(_task())
+    saved, _ = store.append_task(_task())
     store.update_task(saved.id, {"Status": "Not Started", "Notes": "+ ok"})
     assert store.backend.column("Master", "Status")[1] == "Not Started"
     assert store.backend.column("Master", "Notes")[1] == "+ ok"
@@ -346,7 +348,7 @@ def test_google_backend_does_not_retry_client_errors():
 
 
 def test_update_task_keeps_cache_without_reload(store):
-    saved = store.append_task(_task())
+    saved, _ = store.append_task(_task())
     store.update_task(saved.id, {"Status": "In Progress"})
     gets = len([call for call in store.backend.calls if call[0] == "get"])
     assert store.task_by_source_id("msg-1").status == "In Progress"
