@@ -309,8 +309,21 @@ class FakeGmailClient:
         self.sent.append((email, sender_name))
 
 
+class FakeChatClient:
+    """Chat attachment downloads from a dict of resource name -> bytes."""
+
+    def __init__(self, files: dict[str, bytes] | None = None):
+        self.files = {"resource-1": b"xlsx-bytes"} if files is None else files
+
+    def download_attachment(self, resource_name: str) -> bytes:
+        if resource_name not in self.files:
+            raise OSError("download failed")
+        return self.files[resource_name]
+
+
 __all__ = [
     "FakeAIProvider",
+    "FakeChatClient",
     "FakeDriveStore",
     "FakeGmailClient",
     "FakeSheetStore",
