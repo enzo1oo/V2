@@ -23,3 +23,15 @@ def fixture_text():
         return (FIXTURES / name).read_text(encoding="utf-8")
 
     return load
+
+
+@pytest.fixture(autouse=True)
+def log_everything():
+    """Build every log record, so a bad `extra` field fails in tests, not in production."""
+    import logging
+
+    logger = logging.getLogger("grc")
+    previous = logger.level
+    logger.setLevel(logging.DEBUG)
+    yield
+    logger.setLevel(previous)

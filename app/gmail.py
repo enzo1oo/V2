@@ -24,6 +24,12 @@ from app.models import Attachment, FailureRow, RawRequest
 from app.pipeline import Services, process_request
 from app.sheets import SchemaError
 
+
+def _log_counts(run: BaseModel) -> dict[str, object]:
+    """Run counts as log fields; prefixed because names like `created` are reserved by logging."""
+    return {f"n_{key}": value for key, value in run.model_dump().items()}
+
+
 logger = logging.getLogger("grc.gmail")
 
 SCOPES = (
@@ -343,5 +349,5 @@ def process_inbox(gmail: GmailClient, services: Services, limit: int = THREADS_P
             run.created += 1
         else:
             run.duplicates += 1
-    logger.info("gmail_run", extra=run.model_dump())
+    logger.info("gmail_run", extra=_log_counts(run))
     return run

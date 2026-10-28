@@ -23,6 +23,12 @@ from app.pipeline import SERVICE_USER, Services, process_request
 from app.route import find_person, load_ratio
 from app.sheets import SchemaError, SheetStore
 
+
+def _log_counts(run: BaseModel) -> dict[str, object]:
+    """Run counts as log fields; prefixed because names like `created` are reserved by logging."""
+    return {f"n_{key}": value for key, value in run.model_dump().items()}
+
+
 logger = logging.getLogger("grc.jobs")
 
 NO_EMAIL_FLAG = "Assignment email not sent: doer has no email in Staff"
@@ -65,7 +71,7 @@ def run_changes(store: SheetStore, gmail: GmailClient, sheet_url: str) -> Change
             for task in tasks
         ]
         store.write_state(rows)
-        logger.info("changes_run", extra=run.model_dump())
+        logger.info("changes_run", extra=_log_counts(run))
         return run
 
     staff = store.staff()
@@ -105,7 +111,7 @@ def run_changes(store: SheetStore, gmail: GmailClient, sheet_url: str) -> Change
         store.write_state(list(rows.values()) + [s for i, s in state.items() if i not in rows])
         _audit(store, task.id, "Assignment emailed", "Doer", doer)
     store.write_state(list(rows.values()))
-    logger.info("changes_run", extra=run.model_dump())
+    logger.info("changes_run", extra=_log_counts(run))
     return run
 
 
@@ -217,7 +223,7 @@ def run_recurring(services: Services, today: date | None = None) -> RecurringRun
                 run.created += 1
             else:
                 run.existing += 1
-    logger.info("recurring_run", extra=run.model_dump())
+    logger.info("recurring_run", extra=_log_counts(run))
     return run
 
 
@@ -309,5 +315,5 @@ def run_digest(
     email = manager_digest(config.manager_email.strip(), sections, sheet_url, label)
     if email is not None:
         run.manager_sent = send(email, "manager")
-    logger.info("digest_run", extra=run.model_dump())
+    logger.info("digest_run", extra=_log_counts(run))
     return run
