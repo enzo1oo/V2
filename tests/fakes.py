@@ -256,29 +256,40 @@ class FakeAIProvider:
 
 
 class FakeGmailClient:
-    """Intake mailbox in memory: threads with labels, newest message per thread, sent mail."""
+    """The bot mailbox in memory: messages with labels (INBOX/UNREAD included), threads,
+    replies and sent mail. New messages default to an allowed sender, unread in the inbox."""
 
-    def __init__(self) -> None:
-        from app.gmail import GmailMessage, OutgoingEmail
+    def __init__(self, address: str = "grc-bot@example.com") -> None:
+        from app.gmail import GmailMessage
 
-        self.threads: dict[str, dict[str, Any]] = {}  # id -> {"labels": set, "message": msg}
-        self.sent: list[tuple[OutgoingEmail, str]] = []
+        self._message_type = GmailMessage
+        self.bot = address
+        self.messages: dict[str, dict[str, Any]] = {}  # id -> {"message", "labels"}
+        self.sent: list[tuple[Any, str]] = []
+        self.replies: list[tuple[str, Any, str]] = []  # (original id, email, sender name)
         self.fail_reading: set[str] = set()
         self.fail_labelling = False
+        self.fail_reply = False
         self.auth_broken = False
-        self._message_type = GmailMessage
 
-    def add(self, thread_id: str, label: str, **message: Any) -> None:
+    def add(self, message_id: str, labels: tuple[str, ...] = ("INBOX", "UNREAD"), **message: Any):
         values = {
-            "id": f"msg-{thread_id}",
-            "thread_id": thread_id,
+            "id": message_id,
+            "thread_id": f"thread-{message_id}",
             "received_at": datetime(2026, 10, 26, 10, 0),
+            "sender_name": "GRC Manager",
+            "sender_email": "grc-manager@example.com",
+            "subject": "Request",
+            "rfc_message_id": f"<{message_id}@mail.example.com>",
             **message,
         }
-        self.threads[thread_id] = {"labels": {label}, "message": self._message_type(**values)}
+        self.messages[message_id] = {
+            "message": self._message_type(**values),
+            "labels": set(labels),
+        }
 
-    def labels(self, thread_id: str) -> set[str]:
-        return self.threads[thread_id]["labels"]
+    def labels(self, message_id: str) -> set[str]:
+        return self.messages[message_id]["labels"]
 
     def _check(self) -> None:
         if self.auth_broken:
@@ -286,23 +297,42 @@ class FakeGmailClient:
 
             raise GmailAuthError("RefreshError")
 
-    def labelled_threads(self, label: str, limit: int) -> list[str]:
+    def address(self) -> str:
         self._check()
-        return [tid for tid, thread in self.threads.items() if label in thread["labels"]][:limit]
+        return self.bot
 
-    def newest_message(self, thread_id: str) -> Any:
+    def unread_inbox(self, limit: int) -> list[str]:
         self._check()
-        if thread_id in self.fail_reading:
+        unread = [mid for mid, m in self.messages.items() if {"INBOX", "UNREAD"} <= m["labels"]]
+        return unread[:limit]
+
+    def get_message(self, message_id: str) -> Any:
+        self._check()
+        if message_id in self.fail_reading:
             raise OSError("cannot read")
-        return self.threads[thread_id]["message"]
+        return self.messages[message_id]["message"]
 
-    def move_label(self, thread_id: str, remove: str, add: str) -> None:
+    def logged_message_ids(self, thread_id: str) -> list[str]:
+        self._check()
+        return [
+            mid
+            for mid, m in self.messages.items()
+            if m["message"].thread_id == thread_id and "GRC/Logged" in m["labels"]
+        ]
+
+    def modify(self, message_id: str, add: list[str], remove: list[str]) -> None:
         self._check()
         if self.fail_labelling:
             raise OSError("cannot label")
-        labels = self.threads[thread_id]["labels"]
-        labels.discard(remove)
-        labels.add(add)
+        labels = self.messages[message_id]["labels"]
+        labels.difference_update(remove)
+        labels.update(add)
+
+    def reply(self, original: Any, email: Any, sender_name: str) -> None:
+        self._check()
+        if self.fail_reply:
+            raise OSError("cannot send")
+        self.replies.append((original.id, email, sender_name))
 
     def send(self, email: Any, sender_name: str) -> None:
         self._check()

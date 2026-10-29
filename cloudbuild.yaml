@@ -6,7 +6,8 @@
 # The first deploy has no URL yet: deploy once with _SERVICE_URL=pending, read the URL from
 # `gcloud run services describe`, then run the build again with the real URL (README step 9).
 substitutions:
-  _REGION: asia-east2
+  # Singapore: the Gemini API is not offered in Hong Kong (DESIGN D17).
+  _REGION: asia-southeast1
   _REPO: grc
   _SERVICE: grc-tracker
   _RUNTIME_SA: grc-tracker-run
@@ -15,6 +16,7 @@ substitutions:
   _SHARED_DRIVE_FOLDER_ID: ""
   _GMAIL_TOKEN_SECRET: grc-gmail-refresh-token
   _OAUTH_CLIENT_SECRET: grc-gmail-oauth-client
+  _GEMINI_KEY_SECRET: grc-gemini-api-key
   _SERVICE_URL: ""
   _CHAT_PROJECT_NUMBER: ""
 
@@ -62,7 +64,7 @@ steps:
       - --timeout=300
       # Chat cannot send an IAM token: the app itself verifies every Scheduler and Chat token.
       - --allow-unauthenticated
-      - --set-env-vars=GCP_PROJECT=${PROJECT_ID},GCP_REGION=${_REGION},SHEET_ID=${_SHEET_ID},SHARED_DRIVE_FOLDER_ID=${_SHARED_DRIVE_FOLDER_ID},GMAIL_TOKEN_SECRET=${_GMAIL_TOKEN_SECRET},OAUTH_CLIENT_SECRET=${_OAUTH_CLIENT_SECRET},SCHEDULER_SA_EMAIL=${_SCHEDULER_SA}@${PROJECT_ID}.iam.gserviceaccount.com,SERVICE_URL=${_SERVICE_URL},CHAT_PROJECT_NUMBER=${_CHAT_PROJECT_NUMBER},TZ=Asia/Hong_Kong
+      - --set-env-vars=GCP_PROJECT=${PROJECT_ID},GCP_REGION=${_REGION},SHEET_ID=${_SHEET_ID},SHARED_DRIVE_FOLDER_ID=${_SHARED_DRIVE_FOLDER_ID},GMAIL_TOKEN_SECRET=${_GMAIL_TOKEN_SECRET},OAUTH_CLIENT_SECRET=${_OAUTH_CLIENT_SECRET},GEMINI_KEY_SECRET=${_GEMINI_KEY_SECRET},SCHEDULER_SA_EMAIL=${_SCHEDULER_SA}@${PROJECT_ID}.iam.gserviceaccount.com,SERVICE_URL=${_SERVICE_URL},CHAT_PROJECT_NUMBER=${_CHAT_PROJECT_NUMBER},TZ=Asia/Hong_Kong
 
 images:
   - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${BUILD_ID}

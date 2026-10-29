@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 from html import escape
+from typing import Protocol
 
-from app.gmail import OutgoingEmail
-from app.models import StaffMember, Task
+from app.models import OutgoingEmail, StaffMember, Task, TaskResult
 from app.route import find_person
 
 DIVIDER = "-" * 60
+
+
+class HasSender(Protocol):
+    subject: str
+    sender_email: str
 
 
 class MissingEmail(Exception):
@@ -83,6 +88,29 @@ def assignment_email(task: Task, staff: list[StaffMember], sheet_url: str) -> Ou
         subject=assignment_subject(task),
         text="\n".join(text_lines),
         html=html,
+    )
+
+
+# --- Acknowledgement (DESIGN section 4 step 11) ------------------------------------------------
+
+
+def acknowledgement_email(result: TaskResult, original: HasSender) -> OutgoingEmail:
+    """The reply to the person who emailed the bot, sent in the same thread."""
+    subject = original.subject.strip()
+    if not subject.lower().startswith("re:"):
+        subject = f"Re: {subject}" if subject else f"Re: [GRC] {result.task_id}"
+    lines = [
+        f"{'Logged' if result.created else 'Already logged'} as {result.task_id}: {result.title}",
+        f"Proposed owner: {result.owner or 'none – needs review'}",
+        f"Due: {result.due_date:%d %b %Y}" if result.due_date else "Due: not set",
+        f"Flags: {'; '.join(result.flags) if result.flags else 'none'}",
+        f"Files: {result.files_url}",
+        "",
+        "Waiting for manager approval. This is an automatic reply from the GRC tracker.",
+    ]
+    html = "".join(f"<p>{escape(line)}</p>" for line in lines if line)
+    return OutgoingEmail(
+        to=[original.sender_email], subject=subject, text="\n".join(lines), html=html
     )
 
 

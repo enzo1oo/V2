@@ -10,13 +10,11 @@ from app.extract import ai as ai_module
 from app.extract.ai import (
     AI_UNAVAILABLE_FLAG,
     PROMPT_VERSION,
-    BriAgentProvider,
+    GeminiProvider,
     NotConfigured,
     NullProvider,
-    VertexGeminiProvider,
     apply_guardrails,
     build_prompt,
-    provider_from_config,
     run_ai,
 )
 from app.models import AIResult, CatalogEntry
@@ -118,17 +116,150 @@ def test_logs_metadata_but_never_text(caplog):
 # --- providers ---------------------------------------------------------------------------------
 
 
-def test_bri_agent_stub_raises_not_configured():
+# --- GeminiProvider (SDK client mocked) --------------------------------------------------------
+
+
+class StatusError(Exception):
+    """Shaped like the SDK's GenAiError: a message and a numeric status_code."""
+
+    def __init__(self, message, status_code):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def gemini(output_text=None, error=None, mode="api_key"):
+    client = MagicMock()
+    if error is not None:
+        client.interactions.create.side_effect = error
+    else:
+        client.interactions.create.return_value = SimpleNamespace(output_text=output_text)
+    provider = GeminiProvider(mode, "gemini-3.8-flash", client_factory=lambda: client)
+    return provider, client
+
+
+def valid_json(**overrides):
+    return result(**overrides).model_dump_json()
+
+
+def test_gemini_request_shape_and_parsing():
+    provider, client = gemini(valid_json())
+    parsed = provider.extract("Isi pesan", CATALOG, ["Form.xlsx"])
+    assert parsed is not None and parsed.deadline == date(2026, 11, 6)
+    kwargs = client.interactions.create.call_args.kwargs
+    assert kwargs["model"] == "gemini-3.8-flash"
+    assert "Isi pesan" in kwargs["input"] and "- Form.xlsx" in kwargs["input"]
+    assert kwargs["response_format"]["type"] == "text"
+    assert kwargs["response_format"]["mime_type"] == "application/json"
+    assert kwargs["response_format"]["schema"] == ai_module.RESPONSE_SCHEMA
+    assert kwargs["generation_config"] == {"temperature": 0}
+    assert kwargs["store"] is False
+
+
+def test_response_schema_is_derived_from_ai_result_and_self_contained():
+    schema = ai_module.RESPONSE_SCHEMA
+    assert set(schema["properties"]) == set(AIResult.model_fields)
+    assert "$defs" not in json.dumps(schema) and "$ref" not in json.dumps(schema)
+    assert schema["properties"]["title_en"]["maxLength"] == 90
+    assert schema["properties"]["contacts"]["items"]["type"] == "object"
+
+
+def test_invalid_ai_json_counts_as_unavailable():
+    for bad in ('{"title_en": 1}', "not json", '{"title_en": "x"}', ""):
+        provider, _ = gemini(bad)
+        outcome = run_ai(provider, "x", "x", CATALOG, [])
+        assert outcome.result is None and outcome.flags == [AI_UNAVAILABLE_FLAG]
+
+
+def test_over_long_ai_title_is_trimmed_not_rejected():
+    provider, _ = gemini(valid_json(title_en="Manpower planning submission " * 10))
+    outcome = run_ai(provider, "x", ORIGINAL, CATALOG, [])
+    assert outcome.result is not None
+    assert len(outcome.result.title_en) <= 90 and outcome.result.title_en.endswith("…")
+
+
+def test_location_not_supported_falls_back_without_retry():
+    error = StatusError("User location is not supported for the API use.", 400)
+    provider, client = gemini(error=error)
+    outcome = run_ai(provider, "x", "x", CATALOG, [])
+    assert outcome.result is None and outcome.flags == [AI_UNAVAILABLE_FLAG]
+    assert client.interactions.create.call_count == 1  # a 4xx will not succeed on retry
+
+
+@pytest.mark.parametrize("status", [401, 403, 404])
+def test_auth_errors_fall_back_without_retry(status):
+    provider, client = gemini(error=StatusError("API key not valid", status))
+    assert run_ai(provider, "x", "x", CATALOG, []).flags == [AI_UNAVAILABLE_FLAG]
+    assert client.interactions.create.call_count == 1
+
+
+@pytest.mark.parametrize("status", [429, 500, 503])
+def test_transient_errors_are_retried_once(status):
+    provider, client = gemini(error=StatusError("busy", status))
+    assert run_ai(provider, "x", "x", CATALOG, []).flags == [AI_UNAVAILABLE_FLAG]
+    assert client.interactions.create.call_count == 2
+
+
+def test_missing_key_is_not_configured(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    provider = ai_module.provider_from_config("Gemini API key", "", "", "proj", key_secret="")
+    outcome = run_ai(provider, "x", "x", CATALOG, [])
+    assert outcome.flags == [AI_UNAVAILABLE_FLAG]
+
+
+def test_vertex_mode_needs_project_and_region():
+    provider = ai_module.provider_from_config("Vertex", "m", "", "proj")
     with pytest.raises(NotConfigured):
-        BriAgentProvider().extract("x", CATALOG, [])
+        provider.extract("x", CATALOG, [])
 
 
-def test_provider_from_config():
-    assert isinstance(provider_from_config("Off", "", "", "p"), NullProvider)
-    assert isinstance(provider_from_config("BRI agent", "", "", "p"), BriAgentProvider)
-    vertex = provider_from_config("Vertex", "gemini-x", "asia-southeast1", "proj")
-    assert isinstance(vertex, VertexGeminiProvider)
-    assert (vertex.model, vertex.region, vertex.project) == ("gemini-x", "asia-southeast1", "proj")
+def test_provider_mode_switch_is_config_only():
+    off = ai_module.provider_from_config("Off", "", "", "proj")
+    assert isinstance(off, NullProvider)
+    key = ai_module.provider_from_config("Gemini API key", "", "", "proj", "gemini-key")
+    assert isinstance(key, GeminiProvider) and key.mode == "api_key"
+    assert key.name == "Gemini API key" and key.model == "gemini-3.8-flash"  # default model
+    vertex = ai_module.provider_from_config("Vertex", "gemini-x", "asia-southeast1", "proj")
+    assert isinstance(vertex, GeminiProvider) and vertex.mode == "vertex"
+    assert (vertex.model, vertex.name) == ("gemini-x", "Vertex")
+
+
+def test_real_sdk_clients_are_built_per_mode(monkeypatch):
+    """Builds the real google-genai clients (no network call is made)."""
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    key_provider = ai_module.provider_from_config("Gemini API key", "", "", "proj", "secret")
+    client = key_provider._get_client()
+    assert hasattr(client, "interactions")
+    vertex = ai_module.provider_from_config("Vertex", "", "asia-southeast1", "proj")
+    monkeypatch.setattr("google.auth.default", lambda *a, **k: (MagicMock(), "proj"))
+    assert hasattr(vertex._get_client(), "interactions")
+
+
+def test_key_from_env_first_then_secret_manager(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "app.settings.read_secret", lambda name, project=None: calls.append(name) or "from-secret"
+    )
+    monkeypatch.setenv("GEMINI_API_KEY", "from-env")
+    assert ai_module.gemini_api_key("gemini-key", "proj")() == "from-env"
+    monkeypatch.delenv("GEMINI_API_KEY")
+    assert ai_module.gemini_api_key("gemini-key", "proj")() == "from-secret"
+    assert calls == ["gemini-key"]
+
+
+def test_key_never_reaches_the_logs(monkeypatch, caplog):
+    from app.logs import JsonFormatter
+
+    secret = "AIzaSy-super-secret-test-value"
+    monkeypatch.setenv("GEMINI_API_KEY", secret)
+    provider = ai_module.provider_from_config("Gemini API key", "", "", "proj", "s")
+    provider._client_factory = None
+    monkeypatch.setattr(
+        provider, "_build_client", lambda: (_ for _ in ()).throw(StatusError(secret, 400))
+    )
+    with caplog.at_level(logging.DEBUG, logger="grc.ai"):
+        run_ai(provider, "x", "x", CATALOG, [])
+    formatted = "".join(JsonFormatter().format(r) for r in caplog.records)
+    assert secret not in formatted and "AIzaSy" not in formatted
 
 
 def test_prompt_lists_only_non_adhoc_catalog_and_file_names():
@@ -138,29 +269,3 @@ def test_prompt_lists_only_non_adhoc_catalog_and_file_names():
     assert "- Form.xlsx" in prompt
     assert "Isi pesan" in prompt
     assert "{{" not in prompt
-
-
-def test_vertex_provider_request_and_parsing():
-    client = MagicMock()
-    payload = result().model_dump(mode="json")
-    client.models.generate_content.return_value = SimpleNamespace(text=json.dumps(payload))
-    provider = VertexGeminiProvider("proj", "asia-southeast1", "gemini-x", lambda: client)
-    parsed = provider.extract("Isi pesan", CATALOG, [])
-    assert parsed is not None and parsed.deadline == date(2026, 11, 6)
-    kwargs = client.models.generate_content.call_args.kwargs
-    assert kwargs["model"] == "gemini-x"
-    assert kwargs["config"].temperature == 0
-    assert kwargs["config"].response_mime_type == "application/json"
-    assert kwargs["config"].response_json_schema == ai_module.RESPONSE_SCHEMA
-    assert "Isi pesan" in kwargs["contents"]
-
-
-def test_vertex_invalid_json_counts_as_unavailable():
-    client = MagicMock()
-    client.models.generate_content.return_value = SimpleNamespace(text='{"title_en": 1}')
-    provider = VertexGeminiProvider("proj", "r", "m", lambda: client)
-    assert run_ai(provider, "x", "x", CATALOG, []).flags == [AI_UNAVAILABLE_FLAG]
-
-
-def test_response_schema_matches_ai_result_fields():
-    assert set(ai_module.RESPONSE_SCHEMA["required"]) == set(AIResult.model_fields)

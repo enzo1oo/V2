@@ -28,8 +28,8 @@ TEXTS = {
         "Fix the items below; jobs resume on their own."
     ),
     "request_gave_up": (
-        "A request failed 3 times and was moved to the Gmail label GRC/Failed. "
-        "Open it in the intake mailbox and log it by hand or re-label it to retry."
+        "An email to the GRC bot failed 3 times and got the label GRC/Failed. Fix the cause "
+        "(see the logs), then mark it unread in the bot mailbox to retry, or log it by hand."
     ),
 }
 

@@ -18,6 +18,7 @@ class Settings(BaseModel):
     shared_drive_folder_id: str = ""
     gmail_token_secret: str = ""
     oauth_client_secret: str = ""
+    gemini_key_secret: str = ""
     scheduler_sa_email: str = ""
     service_url: str = ""
     chat_project_number: str = ""

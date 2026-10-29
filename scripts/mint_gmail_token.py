@@ -1,7 +1,8 @@
-"""One-time OAuth consent for the intake mailbox; prints the refresh token for Secret Manager.
+"""One-time OAuth consent for the GRC bot mailbox; prints the refresh token for Secret Manager.
 
-Run this on a trusted laptop, signed in to the browser as the intake mailbox (option A: the
-manager's own mailbox; option B: e.g. grc-intake@). Nothing is written to disk.
+Run this on a trusted laptop, signed in to the browser **as the bot mailbox** (the dedicated
+Workspace account, e.g. grc-bot@<company domain>; DESIGN D3), never as a person. Nothing is
+written to disk.
 
     pip install google-auth-oauthlib        # only needed for this script
     python scripts/mint_gmail_token.py path/to/oauth_client.json

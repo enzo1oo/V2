@@ -1,6 +1,9 @@
 import base64
 import email
+import os
 from datetime import datetime
+from email.message import EmailMessage
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -8,9 +11,14 @@ from app import clock
 from app.extract.ai import NullProvider
 from app.gmail import (
     FAILED_LABEL,
+    IGNORED_LABEL,
+    LOGGED_LABEL,
+    REPLY_LABEL,
     GmailAuthError,
+    GoogleGmailClient,
     OutgoingEmail,
     build_mime,
+    is_automatic,
     parse_message,
     process_inbox,
 )
@@ -18,27 +26,31 @@ from app.pipeline import Services
 from app.sheets import SchemaError
 from tests.fakes import FakeDriveStore, FakeGmailClient, FakeSheetsBackend, FakeSheetStore
 
-INTAKE, DONE = "GRC/To log", "GRC/Logged"
+READ_AND_ARCHIVED = {"INBOX", "UNREAD"}
 
 
 def b64(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode().rstrip("=")
 
 
-# --- parse_message -----------------------------------------------------------------------------
+# --- parse_message / build_mime ----------------------------------------------------------------
 
 
-def gmail_json():
+def gmail_json(**header_overrides):
+    headers = {
+        "From": "=?UTF-8?B?R1JDIE1hbmFnZXI=?= <Mgr@Example.com>",
+        "Subject": "Fwd: Data request",
+        "Message-ID": "<abc@mail.example.com>",
+        "References": "<older@mail.example.com>",
+        **header_overrides,
+    }
     return {
         "id": "m1",
         "threadId": "t1",
         "internalDate": str(int(datetime(2026, 10, 26, 3, 0, tzinfo=clock.TZ).timestamp() * 1000)),
         "payload": {
             "mimeType": "multipart/mixed",
-            "headers": [
-                {"name": "From", "value": "=?UTF-8?B?R1JDIE1hbmFnZXI=?= <Mgr@Example.com>"},
-                {"name": "Subject", "value": "Fwd: Data request"},
-            ],
+            "headers": [{"name": k, "value": v} for k, v in headers.items()],
             "parts": [
                 {
                     "mimeType": "multipart/alternative",
@@ -86,29 +98,42 @@ def test_parse_message():
     ]
     assert fetched == [("m1", "att-1")]
     assert message.received_at == datetime(2026, 10, 26, 3, 0, tzinfo=clock.TZ)
+    assert message.rfc_message_id == "<abc@mail.example.com>"
+    assert message.references == "<older@mail.example.com>"
+    assert message.automatic is False
 
 
-def test_build_mime_plain_and_html():
-    out = OutgoingEmail(
-        to=["a@example.com"],
-        cc=["b@example.com"],
-        subject="[GRC] G-0001 – Title",
-        text="Hi",
-        html="<p>Hi</p>",
-    )
-    raw = build_mime(out, "intake@example.com", "GRC Tracker")
+@pytest.mark.parametrize(
+    ("headers", "sender", "automatic"),
+    [
+        ({"auto-submitted": "auto-replied"}, "a@example.com", True),
+        ({"auto-submitted": "no"}, "a@example.com", False),
+        ({"x-autoreply": "yes"}, "a@example.com", True),
+        ({"precedence": "bulk"}, "a@example.com", True),
+        ({}, "mailer-daemon@example.com", True),
+        ({}, "noreply@example.com", True),
+        ({}, "a@example.com", False),
+    ],
+)
+def test_is_automatic(headers, sender, automatic):
+    assert is_automatic(headers, sender) is automatic
+
+
+def test_build_mime_reply_headers():
+    out = OutgoingEmail(to=["a@example.com"], subject="Re: x", text="Hi", html="<p>Hi</p>")
+    raw = build_mime(out, "grc-bot@example.com", "GRC Tracker", "<m@x>", "<old@x>")
     parsed = email.message_from_bytes(base64.urlsafe_b64decode(raw))
-    assert parsed["From"] == "GRC Tracker <intake@example.com>"
-    assert parsed["Cc"] == "b@example.com"
-    assert parsed.get_content_type() == "multipart/alternative"
+    assert parsed["From"] == "GRC Tracker <grc-bot@example.com>"
+    assert parsed["In-Reply-To"] == "<m@x>"
+    assert parsed["References"] == "<old@x> <m@x>"
     assert [part.get_content_type() for part in parsed.get_payload()] == ["text/plain", "text/html"]
 
 
 # --- process_inbox -----------------------------------------------------------------------------
 
 
-def services():
-    store = FakeSheetStore(FakeSheetsBackend.from_fixtures())
+def services(backend=None):
+    store = FakeSheetStore(backend or FakeSheetsBackend.from_fixtures())
     store.load()
     return Services(store=store, drive=FakeDriveStore(), ai=NullProvider())
 
@@ -117,154 +142,259 @@ def g_tasks(svc):
     return [task for task in svc.store.tasks() if task.id.startswith("G-")]
 
 
-def test_logs_and_moves_label_after_row(fixture_text):
+def test_allowed_sender_is_logged_acknowledged_in_thread_then_archived(fixture_text):
     gmail = FakeGmailClient()
-    gmail.add("t1", INTAKE, body_text=fixture_text("manpower_planning.txt"))
-    gmail.add("t2", "INBOX", body_text="not for us")
+    gmail.add("m1", body_text=fixture_text("manpower_planning.txt"), subject="Fwd: Manpower")
     svc = services()
     run = process_inbox(gmail, svc)
-    assert (run.threads, run.created, run.failed) == (1, 1, 0)
-    assert gmail.labels("t1") == {DONE}
-    assert gmail.labels("t2") == {"INBOX"}
+    assert (run.messages, run.created, run.ignored, run.failed) == (1, 1, 0, 0)
+
     [task] = g_tasks(svc)
-    assert task.source_id == "msg-t1" and task.source == "Email"
+    assert task.source_id == "m1" and task.source == "Email"
+    assert task.notes == "Manager note: Tolong dicek ya"  # forward unwrap still holds
+    assert task.requester == "BRI"
+
+    [(original_id, ack, sender_name)] = gmail.replies
+    assert original_id == "m1"
+    assert ack.to == ["grc-manager@example.com"]  # the person who emailed the bot
+    assert ack.subject == "Re: Fwd: Manpower"
+    assert ack.text.startswith(f"Logged as {task.id}: ")
+    for expected in ("Proposed owner: Staff F", "Due: 06 Nov 2026", "Weekday mismatch", "Files: "):
+        assert expected in ack.text
+    assert sender_name == "GRC Tracker"
+    assert gmail.labels("m1") == {LOGGED_LABEL}  # read and archived
 
 
-def test_label_failure_is_retried_safely_without_second_row(fixture_text):
+@pytest.mark.parametrize(
+    "sender",
+    ["outsider@other.example.net", "grc-manager@example.co", "someone@sub.example.com"],
+)
+def test_sender_not_allowed_is_ignored(sender):
     gmail = FakeGmailClient()
-    gmail.add("t1", INTAKE, body_text=fixture_text("manpower_planning.txt"))
+    gmail.add("m1", body_text="Mohon kirim laporan ATMR, deadline 15/11/2026.", sender_email=sender)
+    svc = services()
+    run = process_inbox(gmail, svc)
+    assert (run.ignored, run.created) == (1, 0)
+    assert gmail.labels("m1") == {"INBOX", IGNORED_LABEL}  # marked read, kept in inbox
+    assert g_tasks(svc) == [] and gmail.replies == []
+    assert svc.drive.folders == {}
+
+
+def test_allowed_domain_and_exact_address():
+    gmail = FakeGmailClient()
+    gmail.add("m1", body_text="Tolong cek printer", sender_email="Staff.X@Example.com")
+    gmail.add("m2", body_text="Tolong cek printer lagi", sender_email="grc-manager@example.com")
+    assert process_inbox(gmail, services()).created == 2
+
+
+def test_auto_reply_and_own_messages_are_ignored():
+    gmail = FakeGmailClient()
+    gmail.add("m1", body_text="Out of office until Monday", automatic=True)
+    gmail.add("m2", body_text="copy to self", sender_email="grc-bot@example.com")
+    svc = services()
+    run = process_inbox(gmail, svc)
+    assert run.ignored == 2 and g_tasks(svc) == []
+
+
+def test_reply_in_a_logged_thread_goes_to_notes_not_a_new_task():
+    gmail = FakeGmailClient()
+    gmail.add("m1", body_text="Laporan stress test, deadline 20 November 2026.", thread_id="t")
+    svc = services()
+    process_inbox(gmail, svc)
+    gmail.add(
+        "m2",
+        thread_id="t",
+        body_text="Terima kasih, noted.\n\nOn Mon wrote:\n> old",
+        sender_email="staff.a@example.com",
+        received_at=datetime(2026, 10, 26, 11, 15),
+    )
+    run = process_inbox(gmail, svc)
+    assert (run.replies, run.created) == (1, 0)
+    [task] = g_tasks(svc)
+    assert task.notes.endswith(
+        "Reply from staff.a@example.com on 26 Oct 2026 11:15: Terima kasih, noted."
+    )
+    assert "old" not in task.notes  # the quoted chain is dropped
+    assert gmail.labels("m2") == {REPLY_LABEL}
+    assert len(gmail.replies) == 1  # no acknowledgement for the reply
+    audit = svc.store.backend.tabs["AuditLog"]
+    assert audit[-1][audit[0].index("Action")] == "'Reply noted"
+
+
+def test_nothing_is_archived_or_acknowledged_when_the_row_write_fails():
+    gmail = FakeGmailClient()
+    gmail.add("m1", body_text="Laporan stress test, deadline 20 November 2026.")
+    svc = services()
+    svc.store.append_task = MagicMock(side_effect=OSError("sheets down"))
+    run = process_inbox(gmail, svc)
+    assert run.failed == 1
+    assert gmail.labels("m1") == {"INBOX", "UNREAD"}
+    assert gmail.replies == []
+
+
+def test_label_failure_is_retried_without_a_second_row(fixture_text):
+    gmail = FakeGmailClient()
+    gmail.add("m1", body_text=fixture_text("manpower_planning.txt"))
     svc = services()
     gmail.fail_labelling = True
-    run = process_inbox(gmail, svc)
-    assert run.created == 1
-    assert gmail.labels("t1") == {INTAKE}  # still labelled: next run tries again
+    assert process_inbox(gmail, svc).created == 1
+    assert gmail.labels("m1") == {"INBOX", "UNREAD"}
 
     gmail.fail_labelling = False
     run = process_inbox(gmail, svc)
     assert (run.created, run.duplicates) == (0, 1)
-    assert gmail.labels("t1") == {DONE}
+    assert gmail.labels("m1") == {LOGGED_LABEL}
     assert len(g_tasks(svc)) == 1
+    assert gmail.replies[-1][1].text.startswith("Already logged as G-0001")
 
 
-def test_failure_leaves_label_then_gives_up_after_three(fixture_text):
+def test_acknowledgement_failure_still_archives():
     gmail = FakeGmailClient()
-    gmail.add("t1", INTAKE, body_text="Mohon kirim laporan.")
-    gmail.add("t2", INTAKE, body_text=fixture_text("printer.txt"))
+    gmail.add("m1", body_text="Laporan stress test, deadline 20 November 2026.")
+    gmail.fail_reply = True
+    run = process_inbox(gmail, services())
+    assert (run.created, run.ack_failed) == (1, 1)
+    assert gmail.labels("m1") == {LOGGED_LABEL}
+
+
+def test_failure_stays_unread_then_gives_up_after_three():
+    gmail = FakeGmailClient()
+    gmail.add("m1", body_text="Mohon kirim laporan.")
     svc = services()
     svc.drive.fail_upload = "original.txt"
-
     for attempt in (1, 2):
         run = process_inbox(gmail, svc)
-        assert run.failed == 2 and run.gave_up == 0
-        assert gmail.labels("t1") == {INTAKE}
-        assert svc.store.failures()["msg-t1"].count == attempt
+        assert run.failed == 1 and run.gave_up == 0
+        assert gmail.labels("m1") == {"INBOX", "UNREAD"}
+        assert svc.store.failures()["m1"].count == attempt
     run = process_inbox(gmail, svc)
-    assert run.gave_up == 2
-    assert gmail.labels("t1") == {FAILED_LABEL}
+    assert run.gave_up == 1
+    assert gmail.labels("m1") == {"INBOX", FAILED_LABEL}
     assert g_tasks(svc) == []
-    assert svc.store.failures()["msg-t1"].last_error == "OSError"
 
 
-def test_one_bad_thread_does_not_stop_the_others(fixture_text):
+def test_one_bad_message_does_not_stop_the_others(fixture_text):
     gmail = FakeGmailClient()
-    gmail.add("t1", INTAKE, body_text="x")
-    gmail.add("t2", INTAKE, body_text=fixture_text("printer.txt"))
-    gmail.fail_reading.add("t1")
+    gmail.add("m1", body_text="x")
+    gmail.add("m2", body_text=fixture_text("printer.txt"))
+    gmail.fail_reading.add("m1")
     svc = services()
     run = process_inbox(gmail, svc)
     assert (run.failed, run.created) == (1, 1)
-    assert svc.store.failures()["t1"].count == 1  # keyed by thread when unreadable
 
 
-def test_auth_failure_stops_and_keeps_labels(fixture_text):
+def test_auth_failure_stops_and_leaves_messages_unread():
     gmail = FakeGmailClient()
-    gmail.add("t1", INTAKE, body_text="x")
+    gmail.add("m1", body_text="x")
     gmail.auth_broken = True
     with pytest.raises(GmailAuthError):
         process_inbox(gmail, services())
     gmail.auth_broken = False
-    assert gmail.labels("t1") == {INTAKE}
+    assert gmail.labels("m1") == {"INBOX", "UNREAD"}
 
 
 def test_schema_error_stops_the_run(monkeypatch):
     gmail = FakeGmailClient()
-    gmail.add("t1", INTAKE, body_text="x")
-    svc = services()
+    gmail.add("m1", body_text="x")
 
     def broken(*args, **kwargs):
         raise SchemaError(["Master is missing column(s): Source ID"])
 
     monkeypatch.setattr("app.gmail.process_request", broken)
     with pytest.raises(SchemaError):
-        process_inbox(gmail, svc)
-    assert gmail.labels("t1") == {INTAKE}
+        process_inbox(gmail, services())
+    assert gmail.labels("m1") == {"INBOX", "UNREAD"}
 
 
-def test_limit_of_20_threads():
+def test_read_or_archived_messages_are_not_processed_and_limit_is_20():
     gmail = FakeGmailClient()
+    gmail.add("read", body_text="x", labels=("INBOX",))
+    gmail.add("archived", body_text="x", labels=("UNREAD",))
     for i in range(25):
-        gmail.add(f"t{i}", INTAKE, body_text="Tolong cek printer")
+        gmail.add(f"m{i}", body_text="Tolong cek printer")
     run = process_inbox(gmail, services())
-    assert run.threads == 20
+    assert run.messages == 20
+    assert gmail.labels("read") == {"INBOX"}
+
+
+def test_empty_allowed_senders_ignores_everyone():
+    backend = FakeSheetsBackend.from_fixtures()
+    for row in backend.tabs["Config"]:
+        if row[0] == "Allowed senders":
+            row[1] = ""
+    gmail = FakeGmailClient()
+    gmail.add("m1", body_text="Tolong cek printer")
+    assert process_inbox(gmail, services(backend)).ignored == 1
 
 
 # --- GoogleGmailClient (API client mocked) -----------------------------------------------------
 
 
 def google_client():
-    from unittest.mock import MagicMock
-
-    from app.gmail import GoogleGmailClient
-
     client = GoogleGmailClient(credentials=object())
     users = MagicMock()
     client._local.service = MagicMock()
     client._local.service.users.return_value = users
     users.labels.return_value.list.return_value.execute.return_value = {
-        "labels": [{"name": INTAKE, "id": "L1"}]
+        "labels": [{"name": LOGGED_LABEL, "id": "L1"}]
     }
     users.labels.return_value.create.return_value.execute.return_value = {"id": "L2"}
+    users.getProfile.return_value.execute.return_value = {"emailAddress": "GRC-Bot@example.com"}
     return client, users
 
 
-def test_newest_message_is_the_request():
+def test_unread_inbox_query_and_oldest_first():
+    client, users = google_client()
+    users.messages.return_value.list.return_value.execute.return_value = {
+        "messages": [{"id": "new"}, {"id": "old"}]
+    }
+    assert client.unread_inbox(20) == ["old", "new"]
+    kwargs = users.messages.return_value.list.call_args.kwargs
+    assert kwargs["labelIds"] == ["INBOX", "UNREAD"] and kwargs["maxResults"] == 20
+
+
+def test_modify_uses_system_labels_and_creates_missing_ones():
+    client, users = google_client()
+    client.modify("m1", ["GRC/Ignored"], ["UNREAD"])
+    client.modify("m2", ["GRC/Ignored"], ["UNREAD", "INBOX"])
+    users.labels.return_value.create.assert_called_once()
+    body = users.messages.return_value.modify.call_args.kwargs["body"]
+    assert body == {"addLabelIds": ["L2"], "removeLabelIds": ["UNREAD", "INBOX"]}
+
+
+def test_logged_message_ids_in_thread():
     client, users = google_client()
     users.threads.return_value.get.return_value.execute.return_value = {
-        "messages": [{"id": "old", "internalDate": "1"}, {"id": "new", "internalDate": "9"}]
+        "messages": [{"id": "a", "labelIds": ["L1"]}, {"id": "b", "labelIds": ["INBOX"]}]
     }
-    users.messages.return_value.get.return_value.execute.return_value = gmail_json()
-    attachments = users.messages.return_value.attachments.return_value
-    attachments.get.return_value.execute.return_value = {"data": b64(b"pdf")}
-    message = client.newest_message("t1")
-    assert message.attachments[0].data == b"pdf"
-    assert users.messages.return_value.get.call_args.kwargs["id"] == "new"
+    assert client.logged_message_ids("t1") == ["a"]
 
 
-def test_move_label_creates_done_label_once():
+def test_reply_is_sent_in_the_thread_with_threading_headers():
     client, users = google_client()
-    client.move_label("t1", remove=INTAKE, add=DONE)
-    client.move_label("t2", remove=INTAKE, add=DONE)
-    users.labels.return_value.create.assert_called_once()
-    body = users.threads.return_value.modify.call_args.kwargs["body"]
-    assert body == {"removeLabelIds": ["L1"], "addLabelIds": ["L2"]}
-
-
-def test_missing_intake_label_means_no_threads():
-    client, users = google_client()
-    assert client.labelled_threads("Other/label", 20) == []
-    users.threads.return_value.list.assert_not_called()
+    original = parse_message(gmail_json(), lambda *a: b"")
+    out = OutgoingEmail(to=["mgr@example.com"], subject="Re: x", text="t", html="<p>t</p>")
+    client.reply(original, out, "GRC Tracker")
+    client.send(out, "GRC Tracker")
+    users.getProfile.assert_called_once()
+    first = users.messages.return_value.send.call_args_list[0].kwargs["body"]
+    assert first["threadId"] == "t1"
+    raw = email.message_from_bytes(base64.urlsafe_b64decode(first["raw"]))
+    assert raw["In-Reply-To"] == "<abc@mail.example.com>"
+    assert raw["From"] == "GRC Tracker <grc-bot@example.com>"
+    assert "threadId" not in users.messages.return_value.send.call_args_list[1].kwargs["body"]
 
 
 def test_refresh_error_becomes_gmail_auth_error():
     from google.auth.exceptions import RefreshError
 
     client, users = google_client()
-    users.labels.return_value.list.return_value.execute.side_effect = RefreshError("invalid_grant")
+    users.getProfile.return_value.execute.side_effect = RefreshError("invalid_grant")
     with pytest.raises(GmailAuthError):
-        client.labelled_threads(INTAKE, 20)
+        client.address()
 
 
-# --- Real MIME email with binary attachments, through the real client code ---------------------
+# --- A real MIME email with binary attachments, through the real client code -------------------
 
 MINIMAL_PDF = (
     b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
@@ -301,10 +431,6 @@ def _gmail_json_from_mime(mime_message, stored):
 
 
 def test_binary_attachments_arrive_byte_identical(fixture_text):
-    import os
-    from email.message import EmailMessage
-    from unittest.mock import MagicMock
-
     files = {
         "Laporan Q3 – Ringkasan ✓.pdf": ("application/pdf", MINIMAL_PDF),
         "data.bin": ("application/octet-stream", os.urandom(50_000)),
@@ -312,6 +438,7 @@ def test_binary_attachments_arrive_byte_identical(fixture_text):
     mail = EmailMessage()
     mail["From"] = "GRC Manager <grc-manager@example.com>"
     mail["Subject"] = "Fwd: Manpower Planning"
+    mail["Message-ID"] = "<mime@mail.example.com>"
     mail.set_content(fixture_text("manpower_planning.txt"))
     for name, (mime, data) in files.items():
         maintype, subtype = mime.split("/")
@@ -320,11 +447,13 @@ def test_binary_attachments_arrive_byte_identical(fixture_text):
     api_message = _gmail_json_from_mime(mail, stored)
 
     client, users = google_client()
-    users.threads.return_value.list.return_value.execute.return_value = {"threads": [{"id": "t"}]}
-    users.threads.return_value.get.return_value.execute.return_value = {
-        "messages": [{"id": "m-mime", "internalDate": "1"}]
+    users.messages.return_value.list.return_value.execute.return_value = {
+        "messages": [{"id": "m-mime"}]
     }
     users.messages.return_value.get.return_value.execute.return_value = api_message
+    users.threads.return_value.get.return_value.execute.return_value = {
+        "messages": [{"id": "m-mime", "labelIds": ["INBOX", "UNREAD"]}]
+    }
 
     def attachment(userId, messageId, id):
         request = MagicMock()
@@ -338,6 +467,10 @@ def test_binary_attachments_arrive_byte_identical(fixture_text):
     saved = svc.drive.only_folder()["files"]
     for name, (_, data) in files.items():
         assert saved[name] == data
-    assert saved["Laporan Q3 – Ringkasan ✓.pdf"].startswith(b"%PDF-1.4")
     [task] = g_tasks(svc)
     assert task.original_message == fixture_text("manpower_planning.txt")
+    sent = users.messages.return_value.send.call_args.kwargs["body"]
+    assert sent["threadId"] == "t-mime"  # acknowledgement in the same thread
+    modify = users.messages.return_value.modify.call_args.kwargs
+    assert modify["id"] == "m-mime"
+    assert modify["body"]["removeLabelIds"] == ["UNREAD", "INBOX"]
