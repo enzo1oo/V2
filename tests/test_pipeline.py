@@ -331,3 +331,67 @@ def test_subject_fallback_title_is_capped():
     process_request(email("", subject="Fwd: " + "Permintaan data " * 20), services)
     title = only_task(services).title
     assert len(title) <= 90 and title.endswith("…")
+
+
+# --- File storage = None (v1.2 decision A: no Drive) --------------------------------------------
+
+
+def no_drive_services():
+    from app.drive import NoFileStorage
+
+    backend = FakeSheetsBackend.from_fixtures()
+    for row in backend.tabs["Config"]:
+        if row[0] == "File storage":
+            row[1] = "None"
+    store = FakeSheetStore(backend)
+    store.load()
+    return Services(store=store, drive=NoFileStorage(), ai=NullProvider())
+
+
+def test_no_file_storage_never_calls_drive_and_names_attachments(fixture_text):
+    services = no_drive_services()  # NoFileStorage raises if the pipeline touches Drive
+    result = process_request(manpower(fixture_text), services)
+    task = only_task(services)
+    assert result.created
+    assert task.files == (
+        "In the original email in the GRC bot mailbox: Form_MPP.xlsx, JPS_MPP.pptx"
+    )
+    assert task.catalog_id == "HR-DATA" and task.due_date == date(2026, 11, 6)
+    assert not any("over 25 MB" in flag for flag in task.flags)
+
+
+def test_no_file_storage_without_attachments_leaves_files_blank():
+    services = no_drive_services()
+    process_request(email("Tolong cek printer"), services)
+    assert only_task(services).files == ""
+
+
+def test_no_file_storage_long_original_is_flagged_as_only_in_the_email():
+    services = no_drive_services()
+    process_request(email("Mohon kirim laporan.\n" + "x" * 50_000), services)
+    task = only_task(services)
+    assert len(task.original_message) == MAX_CELL_CHARS
+    assert any("full text only in the original email" in flag for flag in task.flags)
+
+
+def test_no_file_storage_chat_attachments_are_flagged_not_stored():
+    services = no_drive_services()
+    chat = RawRequest(
+        source="Google Chat",
+        source_id="spaces/x/messages/z",
+        received_at=datetime(2026, 10, 26, 10, 0, tzinfo=clock.TZ),
+        body_text="Laporan stress test, deadline 20 November 2026.",
+        attachments=[Attachment(filename="scan.pdf", mime="application/pdf", data=b"")],
+    )
+    process_request(chat, services)
+    task = only_task(services)
+    assert task.files == "Not stored: scan.pdf"
+    assert any(flag.startswith("Chat attachments not stored") for flag in task.flags)
+
+
+def test_file_storage_defaults_to_none():
+    from app.models import AppConfig
+    from tests.test_error_paths import config_values
+
+    assert AppConfig.model_validate(config_values()).file_storage == "None"
+    assert AppConfig.model_validate(config_values(**{"File storage": ""})).file_storage == "None"

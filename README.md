@@ -22,7 +22,7 @@ Hand edits in Master ──> Apps Script trigger ──> AuditLog, Last updated,
 
 | Path | What it is |
 |---|---|
-| `app/main.py` | FastAPI routes: `/jobs/*` (Scheduler token), `/chat` (Chat token), `/healthz` |
+| `app/main.py` | FastAPI routes: `/jobs/*` (Scheduler token), `/chat` (Chat token), `/health` |
 | `app/pipeline.py` | `process_request`: the one path every request takes |
 | `app/extract/` | cleaning, rule extraction, AI providers (`ai.py`) |
 | `app/route.py` | routing rules 1–5 |
@@ -78,9 +78,9 @@ message, and the Drive folder, and never prints a secret. Steps that write are o
 | Variable | Example | Used for |
 |---|---|---|
 | `GCP_PROJECT` | `bri-hk-grc` | Secret Manager, Vertex AI |
-| `GCP_REGION` | `asia-southeast1` | informational |
+| `GCP_REGION` | `asia-southeast2` | informational |
 | `SHEET_ID` | `1AbC…` (from the sheet URL) | the GRC sheet |
-| `SHARED_DRIVE_FOLDER_ID` | `0AbC…` | parent folder for task folders |
+| `SHARED_DRIVE_FOLDER_ID` | `0AbC…` | parent folder for task folders (only with `File storage` = `Drive`) |
 | `GMAIL_TOKEN_SECRET` | `grc-gmail-refresh-token` | secret name: Gmail refresh token |
 | `OAUTH_CLIENT_SECRET` | `grc-gmail-oauth-client` | secret name: OAuth client JSON |
 | `GEMINI_KEY_SECRET` | `grc-gemini-api-key` | secret name: Gemini API key (AI Studio) |
@@ -95,7 +95,7 @@ rejected (fail closed).
 **Gemini key locally:** put `GEMINI_API_KEY=...` in `.env` (git-ignored); it takes precedence over
 `GEMINI_KEY_SECRET`. Never commit it, paste it into chats or tickets, or pass it on a command line.
 To check the key, model and region with one live call (fake message), run from Cloud Shell or the
-Singapore service, not from Hong Kong:
+Jakarta service, not from Hong Kong:
 
 ```bash
 python scripts/smoke_gemini.py
@@ -121,7 +121,8 @@ one alert. Against `GRC_Tracker_Tabs_v2.xlsx` that means:
       (`Gemini API key`, `Vertex` or `Off`; start with `Off`), `AI model` (blank =
       `gemini-3.8-flash`), `AI region` (Vertex mode only), `Sender name`, `Mask emails for AI`,
       `Requester domains` (e.g. `bri.co.id=BRI`), `Known requesters` (e.g. `BRI, OJK, HKMA`),
-      `Builder email`. `Gmail intake label` is no longer used and can be deleted.
+      `Builder email`, `File storage` (`None` = no Drive, the default; `Drive` = task folders).
+      `Gmail intake label` is no longer used and can be deleted.
 - [ ] Create hidden tabs `_state` (`ID, Status, Owner, Doer, Notified doer, Notified at`) and
       `_failures` (`Key, Count, Last error, Last at`).
 - [ ] Protect `AuditLog`, `_state`, `_failures`: editors = the runtime service account and the
@@ -136,9 +137,8 @@ gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregi
   cloudscheduler.googleapis.com secretmanager.googleapis.com sheets.googleapis.com \
   drive.googleapis.com gmail.googleapis.com chat.googleapis.com aiplatform.googleapis.com
 ```
-```bash
-gcloud artifacts repositories create grc --repository-format=docker --location=asia-southeast1
-```
+The Artifact Registry repo `cloud-run-source-deploy` in `asia-southeast2` was created when Cloud
+Run was connected to the repo; `cloudbuild.yaml` pushes there (`_REPO`).
 
 ### 3. Service accounts and roles (least privilege, DESIGN section 9)
 ```bash
@@ -161,8 +161,10 @@ gcloud iam service-accounts create grc-tracker-scheduler --display-name="GRC tra
       *Domain restricted sharing* (`iam.allowedPolicyMemberDomains`), IT needs an exception for this
       service, or Chat intake is blocked (Gmail and the timed jobs still work).
 
-### 5. Shared Drive
+### 5. Shared Drive (only if Config `File storage` = `Drive`)
 - [ ] Create (or pick) the folder for task folders and note its ID → `SHARED_DRIVE_FOLDER_ID`.
+      With `File storage` = `None` (default) skip this: attachments stay in the archived email in
+      the bot mailbox and the sheet's `Files` column lists their names.
 
 ### 6. Bot mailbox (DESIGN D3, D4, D16)
 - [ ] IT creates a **dedicated Google Workspace account** on the company domain, e.g.
@@ -192,33 +194,37 @@ printf '%s' '<refresh-token>' | gcloud secrets create grc-gmail-refresh-token --
 
 ### 6b. Gemini API key (DESIGN D6, D17, D18)
 - [ ] **Before go-live, Compliance/IT confirm** (D18): using the AI Studio Gemini API from a
-      Singapore server for Hong Kong staff, and (§14) a key from BRI Indonesia's project. If not
+      Jakarta server for Hong Kong staff, and (§14) a key from BRI Indonesia's project. If not
       approved, use `AI provider = Vertex` or `Off`.
 - [ ] Store the key in Secret Manager without it touching a file or shell history:
 ```bash
 read -rsp 'Gemini key: ' k && printf '%s' "$k" | gcloud secrets create grc-gemini-api-key --data-file=- ; unset k
 ```
-- [ ] Check it once from Cloud Shell (Singapore egress), then set Config `AI provider` =
+- [ ] Check it once from Cloud Shell, then set Config `AI provider` =
       `Gemini API key`:
 ```bash
 python scripts/smoke_gemini.py --secret grc-gemini-api-key --project <project>
 ```
 
-### 7. Deploy
-The first deploy has no URL yet, so deploy twice:
+### 7. Deploy (Cloud Build trigger on `main`)
+The service is `v2-git` in `asia-southeast2` at
+`https://v2-git-1085688466076.asia-southeast2.run.app`; `cloudbuild.yaml` already carries these.
+- [ ] Cloud Build → Triggers → the trigger Cloud Run created for the repo → Edit:
+      **Configuration: "Cloud Build configuration file"**, location `cloudbuild.yaml` (not
+      "Dockerfile": that skips the tests and every setting below).
+- [ ] On the trigger, add the substitution variable **`_SHEET_ID`** (and `_SHARED_DRIVE_FOLDER_ID`
+      only with `File storage` = `Drive`). A build without `_SHEET_ID` stops before deploying.
+- [ ] The trigger's service account needs Cloud Run Admin, Artifact Registry Writer, Logs Writer
+      and Service Account User on `grc-tracker-run`.
+- [ ] Push to `main` (or "Run" the trigger). The build runs ruff and the tests, builds, pushes
+      and deploys with `max-instances=1`, `min-instances=0`, **CPU always allocated**, the
+      `grc-tracker-run` service account, unauthenticated ingress (tokens are checked in the app)
+      and all environment variables. Settings changed by hand in the console are replaced by the
+      next deploy, so change them in `cloudbuild.yaml`.
+- [ ] Check: Cloud Build → History shows the build green, then:
 ```bash
-gcloud builds submit --config cloudbuild.yaml --substitutions=_SHEET_ID=<sheet-id>,_SHARED_DRIVE_FOLDER_ID=<folder-id>,_SERVICE_URL=pending,_CHAT_PROJECT_NUMBER=<project-number>
+curl https://v2-git-1085688466076.asia-southeast2.run.app/health
 ```
-```bash
-gcloud run services describe grc-tracker --region asia-southeast1 --format='value(status.url)'
-```
-```bash
-gcloud builds submit --config cloudbuild.yaml --substitutions=_SHEET_ID=<sheet-id>,_SHARED_DRIVE_FOLDER_ID=<folder-id>,_SERVICE_URL=<url-from-above>,_CHAT_PROJECT_NUMBER=<project-number>
-```
-The build runs ruff and the tests first and stops on any failure. It deploys with
-`max-instances=1`, `min-instances=0` and **CPU always allocated** (slow Chat requests finish in
-the background), in **asia-southeast1** (Singapore): the Gemini API is not offered in Hong Kong
-(D17).
 
 ### 8. Cloud Scheduler (all times Asia/Hong_Kong)
 Every job posts to the service with an OIDC token whose **audience is the service URL itself**
@@ -226,7 +232,7 @@ Every job posts to the service with an OIDC token whose **audience is the servic
 ```bash
 for job in "gmail|*/10 * * * *" "changes|*/5 8-19 * * *" "recurring|0 7 * * *" "digest|0 9 * * 1-5"; do
   name="${job%%|*}"; cron="${job#*|}"
-  gcloud scheduler jobs create http "grc-$name" --location=asia-southeast1 --schedule="$cron" \
+  gcloud scheduler jobs create http "grc-$name" --location=asia-southeast2 --schedule="$cron" \
     --time-zone="Asia/Hong_Kong" --http-method=POST --uri="<url>/jobs/$name" \
     --oidc-service-account-email="grc-tracker-scheduler@<project>.iam.gserviceaccount.com" \
     --oidc-token-audience="<url>" --attempt-deadline=300s
@@ -255,7 +261,8 @@ In the Cloud console → Google Chat API → Configuration:
       most once an hour per kind, to `Manager email` and `Builder email`.
 
 ### 12. Smoke test
-- [ ] `curl <url>/healthz` → `{"status":"ok"}`; `curl -X POST <url>/jobs/gmail` → 401.
+- [ ] `curl <url>/health` → `{"status":"ok"}`; `curl -X POST <url>/jobs/gmail` → 401. (Use
+      `/health`: Cloud Run can intercept `/healthz`.)
 - [ ] Run `grc-changes` once from the Scheduler console (first run only records `_state`).
 - [ ] From an allowed sender, email the bot; run `grc-gmail`; a `Proposed` row and a Drive folder
       appear, the sender gets a reply in the thread, and the email is labelled `GRC/Logged`,
@@ -272,7 +279,7 @@ Set Config `AI provider`; no redeploy is needed (read at every job run). Only ma
 names are sent, never file contents; requests are sent with `store=False`.
 - `Off` — rules only; everything works, titles are the message's first sentence.
 - `Gemini API key` — Google AI Studio key from Secret Manager (`GEMINI_KEY_SECRET`). Needs the
-  service in an available region (asia-southeast1) and Compliance sign-off (D18).
+  service in an available region (asia-southeast2) and Compliance sign-off (D18).
 - `Vertex` — Gemini on Vertex AI with the runtime service account: set `AI region` and give the
   service account Vertex AI User. Google's recommendation for unlisted regions (D18).
 

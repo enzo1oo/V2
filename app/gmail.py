@@ -266,7 +266,9 @@ class GoogleGmailClient:
         try:
             return request.execute()
         except RefreshError as error:
-            raise GmailAuthError(type(error).__name__) from None
+            # Google's reason code (e.g. "invalid_grant", "unauthorized_client"); never a token.
+            reason = str(error.args[0] if error.args else error).split(":")[0][:60]
+            raise GmailAuthError(f"RefreshError: {reason}") from None
 
     def _label_id(self, name: str, create: bool) -> str | None:
         if name in (UNREAD, INBOX):

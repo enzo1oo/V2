@@ -19,7 +19,7 @@ the check sees exactly what production sees:
     gcloud auth application-default login \
       --impersonate-service-account=grc-tracker-run@<project>.iam.gserviceaccount.com
 Gemini may answer "location is not supported" from Hong Kong (DESIGN D17); run that step from
-Cloud Shell or a Singapore machine if so.
+Cloud Shell or the Jakarta service if so.
 """
 
 from __future__ import annotations
@@ -118,7 +118,7 @@ def error_text(error: Exception) -> str:
 def check_env() -> None:
     needed = {
         "SHEET_ID": "sheet",
-        "SHARED_DRIVE_FOLDER_ID": "Drive steps",
+        "SHARED_DRIVE_FOLDER_ID": "only if Config File storage = Drive",
         "GMAIL_REFRESH_TOKEN": "mailbox",
         "OAUTH_CLIENT_FILE": "mailbox",
         "GEMINI_API_KEY": "Gemini",
@@ -130,8 +130,20 @@ def check_env() -> None:
         where = ENV_NOTES.get(name, "not in .env")
         if name == "OAUTH_CLIENT_FILE" and value:
             path = client_file_path()
+            raw = value.strip("\"'")
+            looks_like_path = raw.lower().endswith(".json") or "/" in raw or "\\" in raw
             if path is None or not path.is_file():
-                report(f"env {name}", False, f"no file at {path} (use the full path to the JSON)")
+                if not looks_like_path:
+                    # Never echo it: a client ID or secret pasted here by mistake must not print.
+                    report(
+                        f"env {name}",
+                        False,
+                        "the value is not a file path (it looks like a "
+                        "client ID or secret); put the full path to the downloaded client "
+                        "JSON here",
+                    )
+                else:
+                    report(f"env {name}", False, f"no file at {path} (use the full path)")
             else:
                 report(f"env {name}", True, f"file found: {path.name}")
             continue
@@ -302,7 +314,7 @@ def check_gemini(store) -> None:
     except Exception as error:
         hint = ""
         if "location" in str(error).lower():
-            hint = " -> run this step from Cloud Shell or Singapore (DESIGN D17)"
+            hint = " -> run this step from Cloud Shell (DESIGN D17)"
         report(f"Gemini {model}", False, error_text(error) + hint)
         return
     seconds = time.monotonic() - started
@@ -325,7 +337,10 @@ def drive_store():
     return GoogleDriveStore(parent) if parent else None
 
 
-def check_drive(write: bool) -> None:
+def check_drive(write: bool, sheet) -> None:
+    if sheet is not None and sheet.config().file_storage != "Drive":
+        report("Drive", None, "not used (Config File storage = None)")
+        return
     store = drive_store()
     if store is None:
         report("Drive", None, "skipped: SHARED_DRIVE_FOLDER_ID missing")
@@ -389,6 +404,10 @@ def gmail_once(client, store, limit: int) -> None:
         drive = drive_store()
     except Exception:
         drive = None
+    if store is not None and store.config().file_storage != "Drive":
+        from app.drive import NoFileStorage
+
+        drive = NoFileStorage()
     if client is None or store is None or drive is None:
         report("intake run", None, "skipped: needs the mailbox, a valid sheet and the Drive folder")
         return
@@ -417,7 +436,7 @@ def main(argv: list[str]) -> int:
     store = check_sheet()
     client = check_gmail(store)
     check_gemini(store)
-    check_drive(args.write_drive)
+    check_drive(args.write_drive, store)
     if args.send_to:
         send_test(client, args.send_to)
     if args.gmail_once:

@@ -474,3 +474,23 @@ def test_binary_attachments_arrive_byte_identical(fixture_text):
     modify = users.messages.return_value.modify.call_args.kwargs
     assert modify["id"] == "m-mime"
     assert modify["body"]["removeLabelIds"] == ["UNREAD", "INBOX"]
+
+
+def test_refresh_error_reason_is_kept_without_secrets():
+    from google.auth.exceptions import RefreshError
+
+    client, users = google_client()
+    users.getProfile.return_value.execute.side_effect = RefreshError(
+        "invalid_grant: Token has been expired or revoked.", {"error": "invalid_grant"}
+    )
+    with pytest.raises(GmailAuthError, match=r"RefreshError: invalid_grant$"):
+        client.address()
+
+
+def test_acknowledgement_without_file_storage():
+    from app.models import TaskResult
+    from app.notify import acknowledgement_email
+
+    result = TaskResult(task_id="G-0001", created=True, title="T", files_url="")
+    original = type("M", (), {"subject": "Req", "sender_email": "a@example.com"})()
+    assert "Files: none" in acknowledgement_email(result, original).text

@@ -1,7 +1,7 @@
 """One live Gemini call with a FAKE message, to check the key, model, region and schema.
 
 Not part of pytest. Run it by hand where the Gemini API is available, e.g. Cloud Shell or the
-Singapore Cloud Run service; from Hong Kong it may fail with "location is not supported".
+Jakarta Cloud Run service; from Hong Kong it may fail with "location is not supported".
 
     # API-key mode, key in the environment (never pass it on the command line):
     export GEMINI_API_KEY=...            # or put it in the git-ignored .env and `set -a; . ./.env`
@@ -11,7 +11,7 @@ Singapore Cloud Run service; from Hong Kong it may fail with "location is not su
     python scripts/smoke_gemini.py --secret grc-gemini-api-key --project <project>
 
     # Vertex mode:
-    python scripts/smoke_gemini.py --mode vertex --project <project> --region asia-southeast1
+    python scripts/smoke_gemini.py --mode vertex --project <project> --region asia-southeast2
 
 The key is never printed. Exit code 0 = a valid AIResult came back.
 """
@@ -48,7 +48,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--model", default=DEFAULT_AI_MODEL)
     parser.add_argument("--secret", default="", help="Secret Manager name of the API key")
     parser.add_argument("--project", default="")
-    parser.add_argument("--region", default="asia-southeast1", help="Vertex mode only")
+    parser.add_argument("--region", default="asia-southeast2", help="Vertex mode only")
     args = parser.parse_args(argv)
 
     provider = GeminiProvider(

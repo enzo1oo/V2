@@ -1,5 +1,5 @@
 """Token checks (DESIGN section 9). Every /jobs/* call needs a Cloud Scheduler OIDC token and every
-/chat call a Google Chat token; anything else gets 401 with no detail. /healthz is open.
+/chat call a Google Chat token; anything else gets 401 with no detail. /health(z) is open.
 
 - Scheduler: Google-signed ID token, audience = SERVICE_URL, email = SCHEDULER_SA_EMAIL (verified).
 - Chat: token signed by chat@system.gserviceaccount.com, audience = CHAT_PROJECT_NUMBER.

@@ -32,7 +32,7 @@ everyone. Every change is logged.
 | D2 | The Google Sheet is the only data store. The service reads and writes columns **by header name**, never by position. |
 | D3 | Intake is a **dedicated Google Workspace bot mailbox** (company domain, created by IT; never a personal @gmail.com). The service reads every new email in its inbox using an **OAuth refresh token for that mailbox**, stored in Secret Manager. Scopes: `gmail.modify`, `gmail.send`. No domain-wide delegation. |
 | D4 | Acknowledgements, assignment emails and digests are sent from the bot mailbox. The display name comes from Config. |
-| D5 | Sheets and Drive use the runtime service account (`grc-tracker-run`). Attachments go to a Shared Drive folder per task: `G-0012 – <title>`. |
+| D5 | Sheets and Drive use the runtime service account (`grc-tracker-run`). Attachments go to a Shared Drive folder per task: `G-0012 – <title>`. **(v1.2, decision A)** Drive is **off by default**: Config `File storage` = `None` stores no files (see section 16, item 7); `Drive` turns the folders back on. |
 | D6 | AI goes through one interface, `AIProvider.extract(text, catalog) -> AIResult`, with two implementations: `GeminiProvider` (the `google-genai` SDK in either **API-key mode**, key from Secret Manager, or **Vertex mode**) and `NullProvider`. Chosen by the Config setting `AI provider` (`Gemini API key` / `Vertex` / `Off`). Version 1 uses API-key mode. |
 | D7 | Google Chat app over HTTP to `POST /chat`; synchronous replies; Google-signed token verified on every call. |
 | D8 | Edits made by hand in the sheet are audited by a small Apps Script edit trigger (`apps_script/audit.gs`), because only Apps Script sees the editor's identity. The service writes its own actions to AuditLog. |
@@ -44,7 +44,7 @@ everyone. Every change is logged.
 | D14 | Routing can match on **known contacts** (emails or full names) stored per Catalog row, as well as keywords. |
 | D15 | Failure never loses a request: an email is only labelled and archived after the row is written; a job retry is always safe (idempotent by `Source ID`). |
 | D16 | Only emails from **allowed senders** (Config `Allowed senders`: addresses or `@domain`) become tasks. Others get the label `GRC/Ignored` and no task. |
-| D17 | Cloud Run region: `asia-southeast1` (Singapore) while the AI Studio key is used. Hong Kong is not in the Gemini API's available regions; Singapore and Indonesia are. |
+| D17 | Cloud Run region: `asia-southeast1` (Singapore) while the AI Studio key is used. Hong Kong is not in the Gemini API's available regions; Singapore and Indonesia are. **(v1.2, decided at deploy)** The service runs in **`asia-southeast2` (Jakarta)** as `v2-git`. |
 | D18 | The Gemini API terms allow access only from an available region. A Singapore server serving Hong Kong staff is a grey area: **Compliance/IT must confirm before go-live**; the fallback is Vertex mode (Config switch), which Google recommends for unlisted regions. |
 
 ---
@@ -94,6 +94,7 @@ Existing: `Effort: Small/Medium/Large`, `Support share`, `Overload threshold`, `
 `Default due (days)`. (`Gmail intake label` is no longer used: the bot reads its whole inbox.)
 **New:** `Allowed senders`, `AI provider` (`Gemini API key` / `Vertex` / `Off`), `AI model`, `AI region`, `Sender name`,
 `Mask emails for AI` (Yes/No, default No). `AI model` default `gemini-3.8-flash`.
+**(v1.2)** `File storage` (`None` default / `Drive`).
 **(v1.1)** `Requester domains` (`domain=Org` pairs, `;`-separated), `Known requesters`
 (comma-separated org names), `Builder email` (alert recipient), all optional.
 
@@ -150,7 +151,8 @@ RawRequest
    summary and deliverables are used when present.
 7. **Missing deadline:** today + `Default due (days)`, flag `No deadline found, default used`.
 8. **Store files.** Create the task folder; save `original.txt` and every attachment; put the folder
-   URL in `Files`. (A file over 25 MB: skip it and flag.)
+   URL in `Files`. (A file over 25 MB: skip it and flag.) **(v1.2)** Only when `File storage` =
+   `Drive`; with `None` this step stores nothing (section 16, item 7).
 9. **Route** (section 5) → `Owner`, `Doer` (= Owner), `Division`, `Catalog ID`, `Routing note`.
 10. **Write** the row (status `Proposed`, `Last updated` = now, `Weight` formula), then AuditLog
     `Created` with the routing note as the reason.
@@ -229,6 +231,7 @@ or `NONE`), `language: "id" | "en" | "mixed"`.
 | `POST /jobs/digest` | Scheduler | weekdays 09:00 | Personal and manager digests |
 | `POST /chat` | Google Chat | on event | Section 8 |
 | `GET /healthz` | anyone | — | 200 OK, no data |
+| `GET /health` **(v1.2)** | anyone | — | Same as `/healthz`; use this one on Cloud Run, which reserves some paths ending in "z" |
 
 Recurring rules: `Monthly` = every month; `Quarterly`/`Semester` = months listed in
 `Due months seen (2026)`, else Jan/Apr/Jul/Oct and Jan/Jul; `Annual` = first listed month. Due day =
@@ -451,3 +454,15 @@ reading attachment contents, multi-mailbox intake, reading Pak Dicki's personal 
 6. **Gemini key:** `GEMINI_API_KEY` (local `.env`) wins over Secret Manager `GEMINI_KEY_SECRET`;
    never printed or logged. A missing key, or Vertex mode without project and `AI region`, is
    "not configured" → `AI unavailable`.
+7. **No file storage (decision A, `File storage` = `None`, the default):** no Drive calls at all.
+   `Files` holds the attachment names and where they are: "In the original email in the GRC bot
+   mailbox: a.pdf, b.xlsx" for email (the bot keeps the archived email), "Not stored: …" for Chat
+   (the task is flagged `Chat attachments not stored …`, and the Chat bot does not download them).
+   An original over 45,000 characters is cut in the cell and flagged `… full text only in the
+   original email` (no `original.txt`). Emails show `Files: none` when there are no attachments.
+   `SHARED_DRIVE_FOLDER_ID` is only needed for `Drive`.
+8. **Gmail auth errors** carry Google's reason code (e.g. `invalid_grant`), never a token.
+9. **Deploy:** Cloud Run service `v2-git` in `asia-southeast2` (Jakarta), deployed by the Cloud
+   Build trigger on `main` using `cloudbuild.yaml` (tests first; a build without `_SHEET_ID`
+   stops). The data-residency side of Jakarta is part of the D18 Compliance check.
+10. **Health check:** `GET /health` (same as `/healthz`, which Cloud Run may intercept).

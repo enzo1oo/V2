@@ -137,7 +137,8 @@ def logged_text(result: TaskResult, failed_files: list[str]) -> str:
     ]
     if result.flags:
         lines.append("Flags: " + "; ".join(result.flags))
-    lines.append(f"Files: {result.files_url}")
+    if result.files_url:
+        lines.append(f"Files: {result.files_url}")
     if failed_files:
         lines.append(
             "I could not attach " + ", ".join(failed_files) + ". Please drop the file(s) in the "
@@ -221,7 +222,15 @@ def handle_event(
         return {"text": HELP_TEXT}
 
     def work() -> tuple[TaskResult, list[str]]:
-        attachments, failed = download_attachments(chat, message)
+        if config.file_storage == "Drive":
+            attachments, failed = download_attachments(chat, message)
+        else:  # no file storage: keep only the names (the pipeline flags them as not stored)
+            attachments = [
+                Attachment(filename=item.get("contentName") or "attachment",
+                           mime=item.get("contentType") or "application/octet-stream", data=b"")
+                for item in message.get("attachment", []) or []
+            ]  # fmt: skip
+            failed = []
         raw = RawRequest(
             source="Google Chat",
             source_id=message.get("name") or f"chat-{clock.now():%Y%m%d%H%M%S%f}",

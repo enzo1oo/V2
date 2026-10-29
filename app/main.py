@@ -1,7 +1,8 @@
 """FastAPI routes. Each call builds a fresh Runtime, so every run starts with one sheet read.
 
 /jobs/* needs a Cloud Scheduler OIDC token and /chat a Google Chat token (app/auth.py);
-/healthz is open and returns no data.
+/health and /healthz are open and return no data (Cloud Run reserves some paths ending in
+"z", so /health is the one to use there; /healthz stays for DESIGN section 7).
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from fastapi.responses import JSONResponse
 from app.alerts import send_alert
 from app.auth import require_chat, require_scheduler
 from app.chat import ChatClient, GoogleChatClient, handle_event
-from app.drive import DriveStore, GoogleDriveStore
+from app.drive import DriveStore, GoogleDriveStore, NoFileStorage
 from app.extract.ai import provider_from_config
 from app.gmail import GmailAuthError, GmailClient, GoogleGmailClient, process_inbox
 from app.jobs import run_changes, run_digest, run_recurring
@@ -76,7 +77,11 @@ def get_runtime() -> Runtime:
     return Runtime(
         settings=settings,
         store=SheetStore(GoogleSheetsBackend(settings.sheet_id)),
-        drive=GoogleDriveStore(settings.shared_drive_folder_id),
+        drive=(
+            GoogleDriveStore(settings.shared_drive_folder_id)
+            if settings.shared_drive_folder_id
+            else NoFileStorage()
+        ),
         gmail=_gmail_client,
         chat=GoogleChatClient(),
     )
@@ -100,6 +105,7 @@ def _job_error(job: str, error: Exception, runtime: Runtime) -> JSONResponse:
 jobs = APIRouter(prefix="/jobs", dependencies=[Depends(require_scheduler)])
 
 
+@app.get("/health")
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
     return {"status": "ok"}

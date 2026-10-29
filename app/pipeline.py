@@ -76,6 +76,16 @@ def _original_file(raw: RawRequest, body: str) -> bytes:
     return ("\n".join(header) + "\n\n" + body).encode("utf-8")
 
 
+def _files_note(raw: RawRequest) -> str:
+    """`Files` without file storage: which attachments came with the request, and where."""
+    if not raw.attachments:
+        return ""
+    names = ", ".join(attachment.filename for attachment in raw.attachments)
+    if raw.source == "Email":
+        return f"In the original email in the GRC bot mailbox: {names}"
+    return f"Not stored: {names}"
+
+
 def _unique_contacts(contacts: list[Contact]) -> list[Contact]:
     seen: set[str] = set()
     unique = []
@@ -164,17 +174,26 @@ def process_request(raw: RawRequest, services: Services, today: date | None = No
         due_date = today + timedelta(days=config.default_due_days)
         flags.append("No deadline found, default used")
 
-    # 8. Files: folder found or created by Source ID, then original.txt and attachments.
-    folder = drive.task_folder(raw.source_id, folder_name("Pending", title))
-    already = drive.file_names(folder.id)
-    if ORIGINAL_FILENAME not in already:
-        drive.upload(folder.id, ORIGINAL_FILENAME, "text/plain", _original_file(raw, original))
-    for attachment in raw.attachments:
-        if attachment.size > MAX_FILE_BYTES:
-            flags.append(f"File skipped (over 25 MB): {attachment.filename}")
-            continue
-        if attachment.filename not in already:
-            drive.upload(folder.id, attachment.filename, attachment.mime, attachment.data)
+    # 8. Files. With `File storage = Drive`: a folder found or created by Source ID, then
+    # original.txt and attachments. With `None` (v1.2 default): nothing is stored; `Files` names
+    # the attachments and where they are (the email in the bot mailbox).
+    folder = None
+    if config.file_storage == "Drive":
+        folder = drive.task_folder(raw.source_id, folder_name("Pending", title))
+        already = drive.file_names(folder.id)
+        if ORIGINAL_FILENAME not in already:
+            drive.upload(folder.id, ORIGINAL_FILENAME, "text/plain", _original_file(raw, original))
+        for attachment in raw.attachments:
+            if attachment.size > MAX_FILE_BYTES:
+                flags.append(f"File skipped (over 25 MB): {attachment.filename}")
+                continue
+            if attachment.filename not in already:
+                drive.upload(folder.id, attachment.filename, attachment.mime, attachment.data)
+        files = folder.url
+    else:
+        files = _files_note(raw)
+        if raw.source == "Google Chat" and raw.attachments:
+            flags.append("Chat attachments not stored (no file storage): email them to the bot")
 
     # 9. Route.
     routed = route(
@@ -196,7 +215,8 @@ def process_request(raw: RawRequest, services: Services, today: date | None = No
     cell_text = original
     if len(cell_text) > MAX_CELL_CHARS:
         cell_text = cell_text[:MAX_CELL_CHARS]
-        flags.append(f"Original message cut to {MAX_CELL_CHARS:,} characters, full text in Files")
+        where = "full text in Files" if folder else "full text only in the original email"
+        flags.append(f"Original message cut to {MAX_CELL_CHARS:,} characters, {where}")
     notes = f"Manager note: {unwrapped.manager_note}" if unwrapped.manager_note else ""
     source = raw.source_id if raw.source == "Recurring" else raw.source
     task = Task(
@@ -217,7 +237,7 @@ def process_request(raw: RawRequest, services: Services, today: date | None = No
         source=source,
         routing_note=routed.note,
         original_message=cell_text,
-        files=folder.url,
+        files=files,
         ai_summary=summary,
         deliverables="\n".join(f"- {item}" for item in deliverables),
         contacts="; ".join(contact.label() for contact in contacts),
@@ -245,12 +265,14 @@ def process_request(raw: RawRequest, services: Services, today: date | None = No
         logger.error(
             "audit_write_failed", extra={"task_id": saved.id, "error_type": type(error).__name__}
         )
-    try:
-        drive.rename_folder(folder.id, folder_name(saved.id, title))
-    except Exception as error:
-        logger.error(
-            "folder_rename_failed", extra={"task_id": saved.id, "error_type": type(error).__name__}
-        )
+    if folder is not None:
+        try:
+            drive.rename_folder(folder.id, folder_name(saved.id, title))
+        except Exception as error:
+            logger.error(
+                "folder_rename_failed",
+                extra={"task_id": saved.id, "error_type": type(error).__name__},
+            )
     logger.info(
         "task_created",
         extra={"task_id": saved.id, "rule": routed.rule, "flags": len(flags)},
