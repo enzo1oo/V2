@@ -1,15 +1,17 @@
 # Test, build, push and deploy grc-tracker (DESIGN section 10).
 #
-#   gcloud builds submit --config cloudbuild.yaml \
-#     --substitutions=_SHEET_ID=...,_SHARED_DRIVE_FOLDER_ID=...,_SERVICE_URL=...,_CHAT_PROJECT_NUMBER=...
+# Runs from the Cloud Build trigger on the repo's main branch (Configuration: "Cloud Build
+# configuration file", path cloudbuild.yaml). Set _SHEET_ID (and _SHARED_DRIVE_FOLDER_ID only if
+# Config "File storage" = Drive) as substitution variables on the trigger. By hand:
 #
-# The first deploy has no URL yet: deploy once with _SERVICE_URL=pending, read the URL from
-# `gcloud run services describe`, then run the build again with the real URL (README step 9).
+#   gcloud builds submit --config cloudbuild.yaml --substitutions=_SHEET_ID=...
+#
 substitutions:
-  # Singapore: the Gemini API is not offered in Hong Kong (DESIGN D17).
-  _REGION: asia-southeast1
-  _REPO: grc
-  _SERVICE: grc-tracker
+  # Jakarta: the Gemini API is offered in Indonesia, not in Hong Kong (DESIGN D17).
+  _REGION: asia-southeast2
+  # The Artifact Registry repo that Cloud Run's GitHub setup created in that region.
+  _REPO: cloud-run-source-deploy
+  _SERVICE: v2-git
   _RUNTIME_SA: grc-tracker-run
   _SCHEDULER_SA: grc-tracker-scheduler
   _SHEET_ID: ""
@@ -17,13 +19,25 @@ substitutions:
   _GMAIL_TOKEN_SECRET: grc-gmail-refresh-token
   _OAUTH_CLIENT_SECRET: grc-gmail-oauth-client
   _GEMINI_KEY_SECRET: grc-gemini-api-key
-  _SERVICE_URL: ""
-  _CHAT_PROJECT_NUMBER: ""
+  # The service's own URL: the audience every Cloud Scheduler token must carry.
+  _SERVICE_URL: https://v2-git-1085688466076.asia-southeast2.run.app
+  # The project number (the number in the URL): the audience of Google Chat tokens.
+  _CHAT_PROJECT_NUMBER: "1085688466076"
 
 options:
   logging: CLOUD_LOGGING_ONLY
 
 steps:
+  - id: settings
+    name: bash
+    args:
+      - -c
+      - |
+        if [ -z "${_SHEET_ID}" ]; then
+          echo "Set the _SHEET_ID substitution on the trigger before deploying." >&2
+          exit 1
+        fi
+
   - id: test
     name: python:3.12-slim
     entrypoint: bash
