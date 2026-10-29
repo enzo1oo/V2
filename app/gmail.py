@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field
 
 from app import clock
 from app.extract.clean import strip_noise
-from app.models import Attachment, AuditEntry, FailureRow, OutgoingEmail, RawRequest
+from app.models import AppConfig, Attachment, AuditEntry, FailureRow, OutgoingEmail, RawRequest
 from app.notify import acknowledgement_email
 from app.pipeline import SERVICE_USER, Services, process_request
 from app.sheets import SchemaError
@@ -404,25 +404,37 @@ def _note_reply(services: Services, message: GmailMessage, logged_ids: list[str]
         )
 
 
+def _ignore_reason(message: GmailMessage, bot: str, config: AppConfig) -> str:
+    """Why a message becomes GRC/Ignored (a fixed code, never an address), or "" to process it."""
+    if message.automatic:
+        return "automatic"
+    if message.sender_email == bot:
+        return "sent_by_bot_mailbox"
+    if not config.sender_allowed(message.sender_email):
+        return "sender_not_allowed"
+    return ""
+
+
 def process_inbox(
     gmail: GmailClient, services: Services, limit: int = MESSAGES_PER_RUN
 ) -> InboxRun:
     """Handle up to `limit` unread inbox messages. Stops on schema or Gmail auth errors, leaving
     the remaining messages unread for the next run."""
     config = services.store.config()
+    if not config.allowed_senders:
+        # D16: an empty list allows nobody, so every message is ignored. Say so plainly.
+        logger.warning("no_allowed_senders")
     bot = gmail.address()
     run = InboxRun()
     for message_id in gmail.unread_inbox(limit):
         run.messages += 1
         try:
             message = gmail.get_message(message_id)
-            if (
-                message.automatic
-                or message.sender_email == bot
-                or not config.sender_allowed(message.sender_email)
-            ):
+            reason = _ignore_reason(message, bot, config)
+            if reason:
                 _modify(gmail, message.id, [IGNORED_LABEL], [UNREAD])
                 run.ignored += 1
+                logger.info("message_ignored", extra={"reason": reason})
                 continue
             logged = [i for i in gmail.logged_message_ids(message.thread_id) if i != message.id]
             if logged and services.store.task_by_source_id(message.id) is None:

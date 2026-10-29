@@ -1,5 +1,6 @@
 import base64
 import email
+import logging
 import os
 from datetime import datetime
 from email.message import EmailMessage
@@ -187,13 +188,17 @@ def test_allowed_domain_and_exact_address():
     assert process_inbox(gmail, services()).created == 2
 
 
-def test_auto_reply_and_own_messages_are_ignored():
+def test_auto_reply_and_own_messages_are_ignored(caplog):
     gmail = FakeGmailClient()
     gmail.add("m1", body_text="Out of office until Monday", automatic=True)
     gmail.add("m2", body_text="copy to self", sender_email="grc-bot@example.com")
+    gmail.add("m3", body_text="Tolong cek", sender_email="outsider@other.example.net")
     svc = services()
-    run = process_inbox(gmail, svc)
-    assert run.ignored == 2 and g_tasks(svc) == []
+    with caplog.at_level(logging.INFO, logger="grc"):
+        run = process_inbox(gmail, svc)
+    assert run.ignored == 3 and g_tasks(svc) == []
+    reasons = [r.reason for r in caplog.records if r.getMessage() == "message_ignored"]
+    assert sorted(reasons) == ["automatic", "sender_not_allowed", "sent_by_bot_mailbox"]
 
 
 def test_reply_in_a_logged_thread_goes_to_notes_not_a_new_task():
@@ -317,14 +322,16 @@ def test_read_or_archived_messages_are_not_processed_and_limit_is_20():
     assert gmail.labels("read") == {"INBOX"}
 
 
-def test_empty_allowed_senders_ignores_everyone():
+def test_empty_allowed_senders_ignores_everyone(caplog):
     backend = FakeSheetsBackend.from_fixtures()
     for row in backend.tabs["Config"]:
         if row[0] == "Allowed senders":
             row[1] = ""
     gmail = FakeGmailClient()
     gmail.add("m1", body_text="Tolong cek printer")
-    assert process_inbox(gmail, services(backend)).ignored == 1
+    with caplog.at_level(logging.WARNING, logger="grc"):
+        assert process_inbox(gmail, services(backend)).ignored == 1
+    assert "no_allowed_senders" in [r.getMessage() for r in caplog.records]
 
 
 # --- GoogleGmailClient (API client mocked) -----------------------------------------------------
