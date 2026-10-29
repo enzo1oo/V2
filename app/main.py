@@ -90,9 +90,17 @@ def get_runtime() -> Runtime:
 RuntimeDep = Annotated[Runtime, Depends(get_runtime)]
 
 
+def _log_schema_error(job: str, error: SchemaError) -> None:
+    # Problems name only tabs, columns and settings (never cell values), so they are safe to log.
+    # The log is the only place they show when Config itself is unreadable and no alert can go.
+    logger.error("schema_error", extra={"job": job, "n_problems": len(error.problems)})
+    for problem in error.problems:
+        logger.error("schema_problem", extra={"job": job, "reason": problem})
+
+
 def _job_error(job: str, error: Exception, runtime: Runtime) -> JSONResponse:
     if isinstance(error, SchemaError):
-        logger.error("schema_error", extra={"job": job})
+        _log_schema_error(job, error)
         send_alert("schema_error", error.problems, runtime.gmail, runtime.store)
         kind = "schema_error"
     else:
@@ -167,9 +175,9 @@ def _handle_chat(event: dict[str, object], runtime: Runtime) -> dict[str, object
     try:
         runtime.store.load()
         return handle_event(event, runtime.services(), runtime.chat, runtime.gmail)
-    except (SchemaError, GmailAuthError) as error:
-        logger.error(
-            "schema_error" if isinstance(error, SchemaError) else "gmail_auth_error",
-            extra={"job": "chat"},
-        )
+    except SchemaError as error:
+        _log_schema_error("chat", error)
+        return {"text": "The GRC tracker is not available right now. Please email the request."}
+    except GmailAuthError:
+        logger.error("gmail_auth_error", extra={"job": "chat"})
         return {"text": "The GRC tracker is not available right now. Please email the request."}

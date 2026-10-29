@@ -1,3 +1,5 @@
+import logging
+
 from fastapi.testclient import TestClient
 
 from app.auth import require_chat, require_scheduler
@@ -59,6 +61,15 @@ def test_gmail_job_schema_error_is_500():
     response = client_with(runtime(backend=backend)).post("/jobs/gmail")
     assert response.status_code == 500
     assert response.json() == {"job": "gmail", "error": "schema_error"}
+
+
+def test_schema_problems_are_logged(caplog):
+    backend = FakeSheetsBackend.from_fixtures()
+    del backend.tabs["_failures"]
+    with caplog.at_level(logging.ERROR, logger="grc"):
+        client_with(runtime(backend=backend)).post("/jobs/gmail")
+    reasons = [r.reason for r in caplog.records if r.getMessage() == "schema_problem"]
+    assert reasons == ["missing tab _failures"]
 
 
 def test_gmail_job_auth_error_is_500():
