@@ -80,7 +80,7 @@ message, and the Drive folder, and never prints a secret. Steps that write are o
 | `GCP_PROJECT` | `bri-hk-grc` | Secret Manager, Vertex AI |
 | `GCP_REGION` | `asia-southeast1` | informational |
 | `SHEET_ID` | `1AbC…` (from the sheet URL) | the GRC sheet |
-| `SHARED_DRIVE_FOLDER_ID` | `0AbC…` | parent folder for task folders |
+| `SHARED_DRIVE_FOLDER_ID` | `0AbC…` | parent folder for task folders (only with `File storage` = `Drive`) |
 | `GMAIL_TOKEN_SECRET` | `grc-gmail-refresh-token` | secret name: Gmail refresh token |
 | `OAUTH_CLIENT_SECRET` | `grc-gmail-oauth-client` | secret name: OAuth client JSON |
 | `GEMINI_KEY_SECRET` | `grc-gemini-api-key` | secret name: Gemini API key (AI Studio) |
@@ -121,7 +121,8 @@ one alert. Against `GRC_Tracker_Tabs_v2.xlsx` that means:
       (`Gemini API key`, `Vertex` or `Off`; start with `Off`), `AI model` (blank =
       `gemini-3.8-flash`), `AI region` (Vertex mode only), `Sender name`, `Mask emails for AI`,
       `Requester domains` (e.g. `bri.co.id=BRI`), `Known requesters` (e.g. `BRI, OJK, HKMA`),
-      `Builder email`. `Gmail intake label` is no longer used and can be deleted.
+      `Builder email`, `File storage` (`None` = no Drive, the default; `Drive` = task folders).
+      `Gmail intake label` is no longer used and can be deleted.
 - [ ] Create hidden tabs `_state` (`ID, Status, Owner, Doer, Notified doer, Notified at`) and
       `_failures` (`Key, Count, Last error, Last at`).
 - [ ] Protect `AuditLog`, `_state`, `_failures`: editors = the runtime service account and the
@@ -161,8 +162,10 @@ gcloud iam service-accounts create grc-tracker-scheduler --display-name="GRC tra
       *Domain restricted sharing* (`iam.allowedPolicyMemberDomains`), IT needs an exception for this
       service, or Chat intake is blocked (Gmail and the timed jobs still work).
 
-### 5. Shared Drive
+### 5. Shared Drive (only if Config `File storage` = `Drive`)
 - [ ] Create (or pick) the folder for task folders and note its ID → `SHARED_DRIVE_FOLDER_ID`.
+      With `File storage` = `None` (default) skip this: attachments stay in the archived email in
+      the bot mailbox and the sheet's `Files` column lists their names.
 
 ### 6. Bot mailbox (DESIGN D3, D4, D16)
 - [ ] IT creates a **dedicated Google Workspace account** on the company domain, e.g.

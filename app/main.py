@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from app.alerts import send_alert
 from app.auth import require_chat, require_scheduler
 from app.chat import ChatClient, GoogleChatClient, handle_event
-from app.drive import DriveStore, GoogleDriveStore
+from app.drive import DriveStore, GoogleDriveStore, NoFileStorage
 from app.extract.ai import provider_from_config
 from app.gmail import GmailAuthError, GmailClient, GoogleGmailClient, process_inbox
 from app.jobs import run_changes, run_digest, run_recurring
@@ -76,7 +76,11 @@ def get_runtime() -> Runtime:
     return Runtime(
         settings=settings,
         store=SheetStore(GoogleSheetsBackend(settings.sheet_id)),
-        drive=GoogleDriveStore(settings.shared_drive_folder_id),
+        drive=(
+            GoogleDriveStore(settings.shared_drive_folder_id)
+            if settings.shared_drive_folder_id
+            else NoFileStorage()
+        ),
         gmail=_gmail_client,
         chat=GoogleChatClient(),
     )

@@ -352,6 +352,8 @@ class AppConfig(_SheetRow):
     known_requesters: list[str] = Field(default_factory=list, alias="Known requesters")
     builder_email: str = Field(default="", alias="Builder email")
     allowed_senders: list[str] = Field(default_factory=list, alias="Allowed senders")
+    # v1.2 decision A: no Drive by default. `Drive` turns task folders back on (DESIGN D5).
+    file_storage: Literal["Drive", "None"] = Field(default="None", alias="File storage")
 
     _lists = field_validator("known_requesters", mode="before")(_split_list)
 
@@ -371,7 +373,7 @@ class AppConfig(_SheetRow):
         domain = "@" + email.rpartition("@")[2]
         return any(entry in (email, domain) for entry in self.allowed_senders)
 
-    @field_validator("ai_provider", "ai_model", "sender_name", mode="before")
+    @field_validator("ai_provider", "ai_model", "sender_name", "file_storage", mode="before")
     @classmethod
     def _blank_uses_default(cls, value: object, info: ValidationInfo) -> object:
         if _blank_to_none(value) is None and info.field_name:

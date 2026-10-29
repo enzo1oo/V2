@@ -173,3 +173,21 @@ def test_fast_failure_replies_with_apology(message_event, svc, monkeypatch):
 
     monkeypatch.setattr(chat_module, "process_request", broken)
     assert handle(message_event, svc) == {"text": FAILED_TEXT}
+
+
+def test_no_file_storage_skips_chat_downloads(message_event):
+    from app.drive import NoFileStorage
+
+    backend = FakeSheetsBackend.from_fixtures()
+    for row in backend.tabs["Config"]:
+        if row[0] == "File storage":
+            row[1] = "None"
+    store = FakeSheetStore(backend)
+    store.load()
+    services = Services(store=store, drive=NoFileStorage(), ai=NullProvider())
+    chat = FakeChatClient(files={})  # any download attempt would fail and be reported
+    reply = handle(message_event, services, chat=chat)["text"]
+    assert reply.startswith("Logged as G-0001")
+    assert "I could not attach" not in reply
+    assert "Chat attachments not stored" in reply
+    assert "Files:" in reply and "Not stored: Format_Stress_Test.xlsx" in reply

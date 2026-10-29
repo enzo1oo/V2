@@ -91,6 +91,10 @@
   {
    "Setting": "Allowed senders",
    "Value": "grc-manager@example.com, @example.com"
+  },
+  {
+   "Setting": "File storage",
+   "Value": "Drive"
   }
  ]
 }

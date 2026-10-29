@@ -104,7 +104,7 @@ def acknowledgement_email(result: TaskResult, original: HasSender) -> OutgoingEm
         f"Proposed owner: {result.owner or 'none – needs review'}",
         f"Due: {result.due_date:%d %b %Y}" if result.due_date else "Due: not set",
         f"Flags: {'; '.join(result.flags) if result.flags else 'none'}",
-        f"Files: {result.files_url}",
+        f"Files: {result.files_url or 'none'}",
         "",
         "Waiting for manager approval. This is an automatic reply from the GRC tracker.",
     ]

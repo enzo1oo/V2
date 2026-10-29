@@ -118,7 +118,7 @@ def error_text(error: Exception) -> str:
 def check_env() -> None:
     needed = {
         "SHEET_ID": "sheet",
-        "SHARED_DRIVE_FOLDER_ID": "Drive steps",
+        "SHARED_DRIVE_FOLDER_ID": "only if Config File storage = Drive",
         "GMAIL_REFRESH_TOKEN": "mailbox",
         "OAUTH_CLIENT_FILE": "mailbox",
         "GEMINI_API_KEY": "Gemini",
@@ -337,7 +337,10 @@ def drive_store():
     return GoogleDriveStore(parent) if parent else None
 
 
-def check_drive(write: bool) -> None:
+def check_drive(write: bool, sheet) -> None:
+    if sheet is not None and sheet.config().file_storage != "Drive":
+        report("Drive", None, "not used (Config File storage = None)")
+        return
     store = drive_store()
     if store is None:
         report("Drive", None, "skipped: SHARED_DRIVE_FOLDER_ID missing")
@@ -401,6 +404,10 @@ def gmail_once(client, store, limit: int) -> None:
         drive = drive_store()
     except Exception:
         drive = None
+    if store is not None and store.config().file_storage != "Drive":
+        from app.drive import NoFileStorage
+
+        drive = NoFileStorage()
     if client is None or store is None or drive is None:
         report("intake run", None, "skipped: needs the mailbox, a valid sheet and the Drive folder")
         return
@@ -429,7 +436,7 @@ def main(argv: list[str]) -> int:
     store = check_sheet()
     client = check_gmail(store)
     check_gemini(store)
-    check_drive(args.write_drive)
+    check_drive(args.write_drive, store)
     if args.send_to:
         send_test(client, args.send_to)
     if args.gmail_once:

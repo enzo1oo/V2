@@ -44,6 +44,22 @@ def folder_url(folder_id: str) -> str:
     return f"https://drive.google.com/drive/folders/{folder_id}"
 
 
+class NoFileStorage:
+    """Config `File storage = None`: the pipeline never calls Drive; any call is a bug."""
+
+    def task_folder(self, source_id: str, name: str) -> Folder:
+        raise RuntimeError("File storage is None")
+
+    def rename_folder(self, folder_id: str, name: str) -> None:
+        raise RuntimeError("File storage is None")
+
+    def file_names(self, folder_id: str) -> set[str]:
+        raise RuntimeError("File storage is None")
+
+    def upload(self, folder_id: str, filename: str, mime: str, data: bytes) -> None:
+        raise RuntimeError("File storage is None")
+
+
 class GoogleDriveStore:
     """Drive API v3 through google-api-python-client, one client per thread, Shared Drive aware."""
 
