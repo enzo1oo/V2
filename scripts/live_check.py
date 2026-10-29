@@ -109,7 +109,19 @@ def error_text(error: Exception) -> str:
     status = getattr(error, "status_code", None) or getattr(
         getattr(error, "resp", None), "status", ""
     )
-    return f"{type(error).__name__} {status} {str(error)[:200]}".strip()
+    # googleapiclient's HttpError keeps the API's own message in .reason; str() starts with the URL.
+    detail = getattr(error, "reason", None) or str(error)
+    return f"{type(error).__name__} {status} {str(detail)[:300]}".strip()
+
+
+def runtime_sa() -> str:
+    # Cloud Shell sets GOOGLE_CLOUD_PROJECT. No <placeholder>: bash reads < > as redirection.
+    project = (
+        os.environ.get("GCP_PROJECT", "").strip()
+        or os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip()
+        or "YOUR-PROJECT-ID"
+    )
+    return f"grc-tracker-run@{project}.iam.gserviceaccount.com"
 
 
 # --- Steps -------------------------------------------------------------------------------------
@@ -167,19 +179,29 @@ def check_sheet():
     try:
         titles = backend.sheet_titles()
     except Exception as error:
+        text = error_text(error)
         if type(error).__name__ == "DefaultCredentialsError":
             report(
                 "sheet reachable",
                 False,
                 "no Google login for Sheets/Drive yet: run "
-                "`gcloud auth application-default login --impersonate-service-account="
-                "grc-tracker-run@<project>.iam.gserviceaccount.com`",
+                f"`gcloud auth application-default login --impersonate-service-account="
+                f"{runtime_sa()}`",
+            )
+        elif "end user credentials" in text or "quota project" in text:
+            # Cloud Shell's and plain gcloud user logins are refused by the Sheets API.
+            report(
+                "sheet reachable",
+                False,
+                "the Sheets API refuses this login (plain gcloud / Cloud Shell user credentials). "
+                f"Run `gcloud auth application-default login --impersonate-service-account="
+                f"{runtime_sa()}` and share the sheet with that account",
             )
         else:
             report(
                 "sheet reachable",
                 False,
-                error_text(error) + " (is the sheet shared with the account you signed in as?)",
+                text + " (is the sheet shared with the account you signed in as?)",
             )
         return None
     report("sheet reachable", True, f"{len(titles)} tabs")
