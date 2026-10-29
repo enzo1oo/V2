@@ -56,6 +56,23 @@ Drive folder, then:
 Locally there is no Scheduler or Chat token, so `/jobs/*` and `/chat` answer 401; call the job
 functions from a Python shell instead, or test through the deployed dev service.
 
+### Live check against the real services
+
+Copy `.env.example` to `.env` and fill it in (it is git-ignored), sign in for Sheets and Drive as
+the runtime service account, then run the read-only check:
+
+```bash
+gcloud auth application-default login --impersonate-service-account=grc-tracker-run@<project>.iam.gserviceaccount.com
+```
+```bash
+python scripts/live_check.py
+```
+
+It checks the sheet (tabs, columns, Config, Staff), the bot mailbox, one Gemini call with a fake
+message, and the Drive folder, and never prints a secret. Steps that write are opt-in:
+`--write-drive` (creates and deletes a test folder), `--send-to <address>` (one test email) and
+`--gmail-once` (real intake of one unread email: writes to the sheet, so use the dev sheet).
+
 ### Environment variables (IDs only, never secrets)
 
 | Variable | Example | Used for |
