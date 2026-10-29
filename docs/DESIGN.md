@@ -44,7 +44,7 @@ everyone. Every change is logged.
 | D14 | Routing can match on **known contacts** (emails or full names) stored per Catalog row, as well as keywords. |
 | D15 | Failure never loses a request: an email is only labelled and archived after the row is written; a job retry is always safe (idempotent by `Source ID`). |
 | D16 | Only emails from **allowed senders** (Config `Allowed senders`: addresses or `@domain`) become tasks. Others get the label `GRC/Ignored` and no task. |
-| D17 | Cloud Run region: `asia-southeast1` (Singapore) while the AI Studio key is used. Hong Kong is not in the Gemini API's available regions; Singapore and Indonesia are. |
+| D17 | Cloud Run region: `asia-southeast1` (Singapore) while the AI Studio key is used. Hong Kong is not in the Gemini API's available regions; Singapore and Indonesia are. **(v1.2, decided at deploy)** The service runs in **`asia-southeast2` (Jakarta)** as `v2-git`. |
 | D18 | The Gemini API terms allow access only from an available region. A Singapore server serving Hong Kong staff is a grey area: **Compliance/IT must confirm before go-live**; the fallback is Vertex mode (Config switch), which Google recommends for unlisted regions. |
 
 ---
@@ -231,6 +231,7 @@ or `NONE`), `language: "id" | "en" | "mixed"`.
 | `POST /jobs/digest` | Scheduler | weekdays 09:00 | Personal and manager digests |
 | `POST /chat` | Google Chat | on event | Section 8 |
 | `GET /healthz` | anyone | — | 200 OK, no data |
+| `GET /health` **(v1.2)** | anyone | — | Same as `/healthz`; use this one on Cloud Run, which reserves some paths ending in "z" |
 
 Recurring rules: `Monthly` = every month; `Quarterly`/`Semester` = months listed in
 `Due months seen (2026)`, else Jan/Apr/Jul/Oct and Jan/Jul; `Annual` = first listed month. Due day =
@@ -461,3 +462,7 @@ reading attachment contents, multi-mailbox intake, reading Pak Dicki's personal 
    original email` (no `original.txt`). Emails show `Files: none` when there are no attachments.
    `SHARED_DRIVE_FOLDER_ID` is only needed for `Drive`.
 8. **Gmail auth errors** carry Google's reason code (e.g. `invalid_grant`), never a token.
+9. **Deploy:** Cloud Run service `v2-git` in `asia-southeast2` (Jakarta), deployed by the Cloud
+   Build trigger on `main` using `cloudbuild.yaml` (tests first; a build without `_SHEET_ID`
+   stops). The data-residency side of Jakarta is part of the D18 Compliance check.
+10. **Health check:** `GET /health` (same as `/healthz`, which Cloud Run may intercept).

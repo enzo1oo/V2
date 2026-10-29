@@ -19,7 +19,7 @@ the check sees exactly what production sees:
     gcloud auth application-default login \
       --impersonate-service-account=grc-tracker-run@<project>.iam.gserviceaccount.com
 Gemini may answer "location is not supported" from Hong Kong (DESIGN D17); run that step from
-Cloud Shell or a Singapore machine if so.
+Cloud Shell or the Jakarta service if so.
 """
 
 from __future__ import annotations
@@ -314,7 +314,7 @@ def check_gemini(store) -> None:
     except Exception as error:
         hint = ""
         if "location" in str(error).lower():
-            hint = " -> run this step from Cloud Shell or Singapore (DESIGN D17)"
+            hint = " -> run this step from Cloud Shell (DESIGN D17)"
         report(f"Gemini {model}", False, error_text(error) + hint)
         return
     seconds = time.monotonic() - started
