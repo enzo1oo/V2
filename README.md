@@ -62,7 +62,7 @@ Copy `.env.example` to `.env` and fill it in (it is git-ignored), sign in for Sh
 the runtime service account, then run the read-only check:
 
 ```bash
-gcloud auth application-default login --impersonate-service-account=grc-tracker-run@<project>.iam.gserviceaccount.com
+gcloud auth application-default login --impersonate-service-account=grc-tracker-run@$(gcloud config get-value project).iam.gserviceaccount.com
 ```
 ```bash
 python scripts/live_check.py
@@ -203,7 +203,7 @@ read -rsp 'Gemini key: ' k && printf '%s' "$k" | gcloud secrets create grc-gemin
 - [ ] Check it once from Cloud Shell, then set Config `AI provider` =
       `Gemini API key`:
 ```bash
-python scripts/smoke_gemini.py --secret grc-gemini-api-key --project <project>
+python scripts/smoke_gemini.py --secret grc-gemini-api-key --project "$(gcloud config get-value project)"
 ```
 
 ### 7. Deploy (Cloud Build trigger on `main`)
@@ -228,14 +228,16 @@ curl https://v2-git-1085688466076.asia-southeast2.run.app/health
 
 ### 8. Cloud Scheduler (all times Asia/Hong_Kong)
 Every job posts to the service with an OIDC token whose **audience is the service URL itself**
-(not the job path). Replace `<url>` and `<project>`:
+(not the job path). Run as is; `URL` and `PROJECT` are filled in for you:
 ```bash
+URL=https://v2-git-1085688466076.asia-southeast2.run.app
+PROJECT=$(gcloud config get-value project)
 for job in "gmail|*/10 * * * *" "changes|*/5 8-19 * * *" "recurring|0 7 * * *" "digest|0 9 * * 1-5"; do
   name="${job%%|*}"; cron="${job#*|}"
   gcloud scheduler jobs create http "grc-$name" --location=asia-southeast2 --schedule="$cron" \
-    --time-zone="Asia/Hong_Kong" --http-method=POST --uri="<url>/jobs/$name" \
-    --oidc-service-account-email="grc-tracker-scheduler@<project>.iam.gserviceaccount.com" \
-    --oidc-token-audience="<url>" --attempt-deadline=300s
+    --time-zone="Asia/Hong_Kong" --http-method=POST --uri="$URL/jobs/$name" \
+    --oidc-service-account-email="grc-tracker-scheduler@$PROJECT.iam.gserviceaccount.com" \
+    --oidc-token-audience="$URL" --attempt-deadline=300s
 done
 ```
 (`*/5 8-19` runs 08:00–19:55; DESIGN says 08:00–20:00.)
@@ -243,7 +245,8 @@ done
 ### 9. Google Chat app
 In the Cloud console → Google Chat API → Configuration:
 - [ ] App name, avatar, description; enable *Receive 1:1 messages* and *Join spaces*.
-- [ ] Connection settings: **HTTP endpoint URL** = `<url>/chat`.
+- [ ] Connection settings: **HTTP endpoint URL** =
+      `https://v2-git-1085688466076.asia-southeast2.run.app/chat`.
 - [ ] Authentication audience: **Project number** (→ `CHAT_PROJECT_NUMBER`).
 - [ ] Visibility: only the GRC team (people or a group in the domain).
 - [ ] Use the classic Chat app (HTTP) setup, not a Workspace add-on; the bot expects that event
@@ -261,11 +264,13 @@ In the Cloud console → Google Chat API → Configuration:
       most once an hour per kind, to `Manager email` and `Builder email`.
 
 ### 12. Smoke test
-- [ ] `curl <url>/health` → `{"status":"ok"}`; `curl -X POST <url>/jobs/gmail` → 401. (Use
-      `/health`: Cloud Run can intercept `/healthz`.)
+- [ ] `curl https://v2-git-1085688466076.asia-southeast2.run.app/health` → `{"status":"ok"}`;
+      `curl -X POST https://v2-git-1085688466076.asia-southeast2.run.app/jobs/gmail` → 401. (Use
+      `/health`: Cloud Run can intercept `/healthz`.) A 403 HTML page instead means Cloud Run
+      itself is blocking callers: grant `allUsers` the `roles/run.invoker` role on the service.
 - [ ] Run `grc-changes` once from the Scheduler console (first run only records `_state`).
-- [ ] From an allowed sender, email the bot; run `grc-gmail`; a `Proposed` row and a Drive folder
-      appear, the sender gets a reply in the thread, and the email is labelled `GRC/Logged`,
+- [ ] From an allowed sender, email the bot; run `grc-gmail`; a `Proposed` row appears (and a Drive
+      folder, only if Config `File storage` = Drive), the sender gets a reply in the thread, and the email is labelled `GRC/Logged`,
       read and archived.
 - [ ] From an address not in `Allowed senders`, email the bot; run `grc-gmail`; it is labelled
       `GRC/Ignored` and no row appears.
