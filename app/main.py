@@ -105,7 +105,8 @@ def _job_error(job: str, error: Exception, runtime: Runtime) -> JSONResponse:
         kind = "schema_error"
     else:
         # The mailbox itself is broken, so no email can go out: the log-based alert covers it.
-        logger.error("gmail_auth_error", extra={"job": job})
+        # str(error) is "RefreshError: <Google reason code>", never a token (gmail.py).
+        logger.error("gmail_auth_error", extra={"job": job, "reason": str(error)})
         kind = "gmail_auth_error"
     return JSONResponse(status_code=500, content={"job": job, "error": kind})
 
@@ -178,6 +179,6 @@ def _handle_chat(event: dict[str, object], runtime: Runtime) -> dict[str, object
     except SchemaError as error:
         _log_schema_error("chat", error)
         return {"text": "The GRC tracker is not available right now. Please email the request."}
-    except GmailAuthError:
-        logger.error("gmail_auth_error", extra={"job": "chat"})
+    except GmailAuthError as error:
+        logger.error("gmail_auth_error", extra={"job": "chat", "reason": str(error)})
         return {"text": "The GRC tracker is not available right now. Please email the request."}

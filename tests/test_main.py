@@ -72,13 +72,16 @@ def test_schema_problems_are_logged(caplog):
     assert reasons == ["missing tab _failures"]
 
 
-def test_gmail_job_auth_error_is_500():
+def test_gmail_job_auth_error_is_500(caplog):
     gmail = FakeGmailClient()
     gmail.add("m1", body_text="x")
     gmail.auth_broken = True
-    response = client_with(runtime(gmail)).post("/jobs/gmail")
+    with caplog.at_level(logging.ERROR, logger="grc"):
+        response = client_with(runtime(gmail)).post("/jobs/gmail")
     assert response.status_code == 500
     assert response.json()["error"] == "gmail_auth_error"
+    [record] = [r for r in caplog.records if r.getMessage() == "gmail_auth_error"]
+    assert record.reason.startswith("RefreshError")
 
 
 def test_changes_recurring_and_digest_endpoints():
