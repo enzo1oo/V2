@@ -1,7 +1,8 @@
 """FastAPI routes. Each call builds a fresh Runtime, so every run starts with one sheet read.
 
 /jobs/* needs a Cloud Scheduler OIDC token and /chat a Google Chat token (app/auth.py);
-/healthz is open and returns no data.
+/health and /healthz are open and return no data (Cloud Run reserves some paths ending in
+"z", so /health is the one to use there; /healthz stays for DESIGN section 7).
 """
 
 from __future__ import annotations
@@ -104,6 +105,7 @@ def _job_error(job: str, error: Exception, runtime: Runtime) -> JSONResponse:
 jobs = APIRouter(prefix="/jobs", dependencies=[Depends(require_scheduler)])
 
 
+@app.get("/health")
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
     return {"status": "ok"}

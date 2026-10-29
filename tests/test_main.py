@@ -33,8 +33,11 @@ def teardown_function():
     app.dependency_overrides.clear()
 
 
-def test_healthz_has_no_data():
-    assert TestClient(app).get("/healthz").json() == {"status": "ok"}
+def test_health_endpoints_have_no_data():
+    client = TestClient(app)
+    for path in ("/health", "/healthz"):
+        response = client.get(path)
+        assert response.status_code == 200 and response.json() == {"status": "ok"}
 
 
 def test_gmail_job(fixture_text):

@@ -177,5 +177,6 @@ def test_chat_needs_chat_token(client):
     assert response.status_code == 401
 
 
-def test_healthz_is_open(client):
+def test_health_is_open(client):
+    assert client.get("/health").status_code == 200
     assert client.get("/healthz").status_code == 200
