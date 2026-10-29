@@ -130,8 +130,20 @@ def check_env() -> None:
         where = ENV_NOTES.get(name, "not in .env")
         if name == "OAUTH_CLIENT_FILE" and value:
             path = client_file_path()
+            raw = value.strip("\"'")
+            looks_like_path = raw.lower().endswith(".json") or "/" in raw or "\\" in raw
             if path is None or not path.is_file():
-                report(f"env {name}", False, f"no file at {path} (use the full path to the JSON)")
+                if not looks_like_path:
+                    # Never echo it: a client ID or secret pasted here by mistake must not print.
+                    report(
+                        f"env {name}",
+                        False,
+                        "the value is not a file path (it looks like a "
+                        "client ID or secret); put the full path to the downloaded client "
+                        "JSON here",
+                    )
+                else:
+                    report(f"env {name}", False, f"no file at {path} (use the full path)")
             else:
                 report(f"env {name}", True, f"file found: {path.name}")
             continue
