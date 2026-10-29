@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -53,21 +54,55 @@ def report(step: str, ok: bool | None, detail: str = "") -> None:
     print(f"[{mark}] {step}" + (f": {detail}" if detail else ""))
 
 
+ENV_NOTES: dict[str, str] = {}  # key -> how its .env line was read (never the value)
+
+
 def load_dotenv(path: Path) -> None:
-    """Minimal .env reader: KEY=VALUE lines, optional quotes and spaces; existing env wins."""
+    """Minimal .env reader: KEY=VALUE lines, optional quotes and spaces. A non-empty variable
+    already in the environment wins; an empty one does not block the .env value."""
     if not path.exists():
         return
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
+    for number, raw in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), start=1):
+        line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
         key, value = key.strip().removeprefix("export ").strip(), value.strip()
+        note = f"line {number}"
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
-        elif " #" in value or value.startswith("#"):
-            value = value.split("#", 1)[0].strip()  # inline comment after an unquoted value
-        os.environ.setdefault(key, value)
+        elif value.startswith(("'", '"')):
+            note += ": opening quote without a closing one on the same line"
+            value = value.strip("\"'")
+        elif value.startswith("#"):
+            note += ": the value is empty (everything after = is a # comment)"
+            value = ""
+        elif " #" in value:
+            value = value.split(" #", 1)[0].strip()  # inline comment after an unquoted value
+        if not value and "empty" not in note and "quote" not in note:
+            note += ": empty after the ="
+        ENV_NOTES[key] = note
+        if os.environ.get(key, "").strip():
+            ENV_NOTES[key] += " (overridden by a non-empty variable already in your shell)"
+            continue
+        os.environ[key] = value
+
+
+def id_from(value: str) -> str:
+    """Accept a full Google Sheets or Drive URL where an ID is expected."""
+    match = re.search(r"/(?:spreadsheets/d|folders)/([A-Za-z0-9_-]{10,})", value)
+    return match.group(1) if match else value.strip()
+
+
+def client_file_path() -> Path | None:
+    """OAUTH_CLIENT_FILE as given, else relative to the repo root."""
+    value = os.environ.get("OAUTH_CLIENT_FILE", "").strip().strip("\"'")
+    if not value:
+        return None
+    path = Path(value).expanduser()
+    if not path.exists() and not path.is_absolute() and (ROOT / path).exists():
+        path = ROOT / path
+    return path
 
 
 def error_text(error: Exception) -> str:
@@ -88,13 +123,22 @@ def check_env() -> None:
         "OAUTH_CLIENT_FILE": "mailbox",
         "GEMINI_API_KEY": "Gemini",
     }
+    if not (ROOT / ".env").exists():
+        report(".env found", None, f"no .env in {ROOT} (on Windows check it is not .env.txt)")
     for name, used_for in needed.items():
         value = os.environ.get(name, "").strip()
-        shown = "set" if value else "missing"
-        if name == "OAUTH_CLIENT_FILE" and value and not Path(value).expanduser().exists():
-            report(f"env {name}", False, "set, but the file does not exist")
+        where = ENV_NOTES.get(name, "not in .env")
+        if name == "OAUTH_CLIENT_FILE" and value:
+            path = client_file_path()
+            if path is None or not path.is_file():
+                report(f"env {name}", False, f"no file at {path} (use the full path to the JSON)")
+            else:
+                report(f"env {name}", True, f"file found: {path.name}")
             continue
-        report(f"env {name}", bool(value) or None, f"{shown} (needed for {used_for})")
+        if not value:
+            report(f"env {name}", None, f"missing [{where}] (needed for {used_for})")
+        else:
+            report(f"env {name}", True, f"set [{where}]")
     if (ROOT / ".env").exists():
         tracked = os.popen(f"git -C {ROOT} ls-files .env").read().strip()
         report(".env is not committed", not tracked, "git-ignored" if not tracked else "TRACKED!")
@@ -103,7 +147,7 @@ def check_env() -> None:
 def check_sheet():
     from app.sheets import GoogleSheetsBackend, SchemaError, SheetStore
 
-    sheet_id = os.environ.get("SHEET_ID", "").strip()
+    sheet_id = id_from(os.environ.get("SHEET_ID", ""))
     if not sheet_id:
         report("sheet", None, "skipped: SHEET_ID missing")
         return None
@@ -111,7 +155,20 @@ def check_sheet():
     try:
         titles = backend.sheet_titles()
     except Exception as error:
-        report("sheet reachable", False, error_text(error) + " (share it with the account in ADC?)")
+        if type(error).__name__ == "DefaultCredentialsError":
+            report(
+                "sheet reachable",
+                False,
+                "no Google login for Sheets/Drive yet: run "
+                "`gcloud auth application-default login --impersonate-service-account="
+                "grc-tracker-run@<project>.iam.gserviceaccount.com`",
+            )
+        else:
+            report(
+                "sheet reachable",
+                False,
+                error_text(error) + " (is the sheet shared with the account you signed in as?)",
+            )
         return None
     report("sheet reachable", True, f"{len(titles)} tabs")
     store = SheetStore(backend)
@@ -173,10 +230,10 @@ def gmail_client():
     from app.gmail import GoogleGmailClient
 
     token = os.environ.get("GMAIL_REFRESH_TOKEN", "").strip()
-    client_file = os.environ.get("OAUTH_CLIENT_FILE", "").strip()
-    if not token or not client_file:
+    path = client_file_path()
+    if not token or path is None:
         return None
-    data = json.loads(Path(client_file).expanduser().read_text(encoding="utf-8"))
+    data = json.loads(path.read_text(encoding="utf-8"))
     data = data.get("installed") or data.get("web") or data
     credentials = Credentials(
         token=None,
@@ -190,7 +247,11 @@ def gmail_client():
 
 
 def check_gmail(store):
-    client = gmail_client()
+    try:
+        client = gmail_client()
+    except Exception as error:
+        report("mailbox", False, f"cannot read the OAuth client file: {type(error).__name__}")
+        return None
     if client is None:
         report("mailbox", None, "skipped: GMAIL_REFRESH_TOKEN or OAUTH_CLIENT_FILE missing")
         return None
@@ -260,7 +321,7 @@ def check_gemini(store) -> None:
 def drive_store():
     from app.drive import GoogleDriveStore
 
-    parent = os.environ.get("SHARED_DRIVE_FOLDER_ID", "").strip()
+    parent = id_from(os.environ.get("SHARED_DRIVE_FOLDER_ID", ""))
     return GoogleDriveStore(parent) if parent else None
 
 
@@ -270,7 +331,7 @@ def check_drive(write: bool) -> None:
         report("Drive", None, "skipped: SHARED_DRIVE_FOLDER_ID missing")
         return
     try:
-        store.file_names(os.environ["SHARED_DRIVE_FOLDER_ID"].strip())
+        store.file_names(id_from(os.environ["SHARED_DRIVE_FOLDER_ID"]))
         report("Drive folder reachable", True, "listing works")
     except Exception as error:
         report("Drive folder reachable", False, error_text(error))
@@ -324,7 +385,10 @@ def gmail_once(client, store, limit: int) -> None:
     from app.gmail import process_inbox
     from app.pipeline import Services
 
-    drive = drive_store()
+    try:
+        drive = drive_store()
+    except Exception:
+        drive = None
     if client is None or store is None or drive is None:
         report("intake run", None, "skipped: needs the mailbox, a valid sheet and the Drive folder")
         return
