@@ -222,8 +222,9 @@ or `NONE`), `language: "id" | "en" | "mixed"`.
   for the installed SDK version: current docs use `client.interactions.create(model=…, input=…,
   response_format={"type": "text", "mime_type": "application/json", "schema":
   AIResult.model_json_schema()})` and read `interaction.output_text`. Model from Config `AI model`,
-  default `gemini-3.8-flash` (stable). API-key mode (Google AI Studio key) reads the key from Secret
-  Manager (`GEMINI_KEY_SECRET`) in production and `GEMINI_API_KEY` locally; Vertex mode uses the
+  default `gemini-3.8-flash` (stable). API-key mode (Google AI Studio key) reads `GEMINI_API_KEY`:
+  **(v1.3, section 18)** injected by Cloud Run from Secret Manager in production, from `.env`
+  locally; Vertex mode uses the
   runtime service account and `AI region`. Switching mode is a Config change, not a code change.
 - The Gemini API does **not** enforce `maxLength` and similar schema limits: always validate the
   response with `AIResult.model_validate_json()` and enforce lengths in pydantic.
@@ -293,7 +294,9 @@ within `Leaving warning (days)` who are still default owners in the Catalog, cou
   OIDC token on `/tasks/*` (audience = service URL, email = runtime SA); Meta's
   `X-Hub-Signature-256` (HMAC of the body with the app secret) on `/wa/webhook`. Reject
   everything else.
-- Secrets only from Secret Manager (Gmail refresh token, OAuth client secret, Gemini API key).
+- Secrets only from Secret Manager (Gmail refresh token, OAuth client secret, Gemini API key;
+  **(v1.3)** WhatsApp access token and app secret), injected by Cloud Run as environment variables
+  (section 18).
   Nothing secret in code, the sheet, env files committed to git, or logs.
 - Least privilege: runtime SA (Sheets via sharing, Drive Shared Drive, Vertex, Secret accessor);
   scheduler SA (`run.invoker` only).
@@ -341,9 +344,9 @@ grc-tracker/
 └── README.md                 # local run, env vars, IT setup checklist, deploy
 ```
 
-Environment variables (IDs only): `GCP_PROJECT`, `GCP_REGION`, `SHEET_ID`, `SHARED_DRIVE_FOLDER_ID`,
-`GMAIL_TOKEN_SECRET`, `OAUTH_CLIENT_SECRET`, `GEMINI_KEY_SECRET`, `SCHEDULER_SA_EMAIL`, `SERVICE_URL`, `CHAT_PROJECT_NUMBER`,
-`TZ=Asia/Hong_Kong`.
+Environment variables: **(v1.3, section 18)** all listed in `app/settings.py` and documented in
+`.env.example`; non-secret production values in `deploy/env.prod.yaml`, secrets in
+`deploy/secrets.txt`. `TZ=Asia/Hong_Kong`.
 
 ---
 
@@ -471,7 +474,8 @@ reading attachment contents (except email PDFs, section 16 item 11), multi-mailb
    (`HttpRetryOptions(attempts=1)`); our 20 s timeout and one retry apply, except that 4xx errors
    other than 408/429 (bad key, location not supported) are not retried. Any failure → `AI
    unavailable`, rules only.
-6. **Gemini key:** `GEMINI_API_KEY` (local `.env`) wins over Secret Manager `GEMINI_KEY_SECRET`;
+6. **Gemini key:** **(v1.3: superseded by section 18, the key is the env var `GEMINI_API_KEY`
+   in both places)** `GEMINI_API_KEY` (local `.env`) wins over Secret Manager `GEMINI_KEY_SECRET`;
    never printed or logged. A missing key, or Vertex mode without project and `AI region`, is
    "not configured" → `AI unavailable`.
 7. **No file storage (decision A, `File storage` = `None`, the default):** no Drive calls at all.
@@ -558,3 +562,32 @@ WhatsApp Cloud API with a number and app that BRI registers in Meta Business Man
     off and its endpoints answer 404 or "skipped".
 11. **Compliance:** WhatsApp messages pass through Meta, and PDF contents reach Gemini unmasked
     (item 11 of section 16). Both belong to the D18 Compliance check.
+
+## 18. One-command deploy (v1.3, approved by the project owner, 3 Nov 2026)
+
+1. **Names stay as deployed:** service `v2-git`, region `asia-southeast2` (Jakarta), runtime
+   account `grc-tracker-run`, scheduler account `grc-tracker-scheduler`, Artifact Registry
+   `cloud-run-source-deploy`, Cloud Tasks queue `wa-process`. They are defined once, in
+   `deploy/config.sh`; `cloudbuild.yaml` repeats three of them and a test checks they agree.
+2. **Settings:** one `pydantic-settings` class (`app/settings.py`) reads every variable from the
+   environment. Secrets are `SecretStr`.
+3. **Secrets are environment variables** that Cloud Run fills from Secret Manager
+   (`--set-secrets`, mapping in `deploy/secrets.txt`): `GMAIL_REFRESH_TOKEN`,
+   `OAUTH_CLIENT_SECRET` (the client JSON), `GEMINI_API_KEY`, `WA_ACCESS_TOKEN`, `WA_APP_SECRET`.
+   The code reads them the same way locally (`.env`). This replaces reading secrets by name at
+   runtime (`GMAIL_TOKEN_SECRET`, `GEMINI_KEY_SECRET`). A new secret version needs a redeploy.
+4. **Non-secret production values** are `deploy/env.prod.yaml` (git-ignored), stored whole as the
+   secret `grc-env-prod`. `deploy/deploy.sh` and the merge-to-main build both deploy from it, so
+   they are identical; values changed by hand in the console are replaced by the next deploy.
+5. **Scripts:** `deploy/setup_gcp.sh` (one-time, idempotent), `deploy/setup_secrets.sh` (values
+   from a file or a hidden prompt; never echoed, never arguments, never on disk),
+   `deploy/deploy.sh` (tests, build, deploy, prints the URLs), `deploy/setup_scheduler.sh` (creates
+   or updates all jobs). `cloudbuild.yaml` runs the tests, builds and calls `deploy/deploy.sh
+   --image`. Secrets without a version (e.g. WhatsApp before Meta is set up) are left out.
+6. **Startup check:** at boot the service checks every required variable (WhatsApp ones only if
+   any is set; `GEMINI_API_KEY` if Config `AI provider` = Gemini API key; `SHARED_DRIVE_FOLDER_ID`
+   with `File storage` = Drive) and the sheet's tabs, columns and settings. Missing names are
+   logged (names only) and `/health` and `/healthz` answer 503 with the lists; sheet problems are
+   re-checked at most once a minute, so fixing the sheet needs no redeploy.
+7. **Not done:** `TEST_MODE` (no such mode exists in the code).
+
