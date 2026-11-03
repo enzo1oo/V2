@@ -4,17 +4,22 @@ The AI only suggests a title, summary, deliverables, deadline and catalog ID. It
 assignee. `run_ai` adds the guardrails (timeout, one retry, quote check, catalog check) so every
 provider gets them, and it never raises: on any failure the pipeline continues on rules.
 
+(v1.2, section 16 item 11) PDF attachments of an email are sent to the AI as they are, next to
+the masked text, so it can read the classification, deadline and deliverables from them. PDF
+contents are not masked.
+
 Logs carry provider, model, prompt version, latency and success only — never message text.
 """
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import re
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
@@ -23,15 +28,22 @@ from typing import Any, Literal, Protocol
 
 from pydantic import ValidationError
 
-from app.models import DEFAULT_AI_MODEL, AIResult, CatalogEntry
+from app.models import DEFAULT_AI_MODEL, AIResult, Attachment, CatalogEntry
 
 logger = logging.getLogger("grc.ai")
 
-PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "extract_v1.md"
-PROMPT_VERSION = "extract_v1"
+PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "extract_v2.md"
+PROMPT_VERSION = "extract_v2"
 MAX_INPUT_CHARS = 8_000
 TIMEOUT_SECONDS = 20.0
+# Reading PDFs takes longer than reading text; the Gmail run's time budget (gmail.py) allows it.
+PDF_TIMEOUT_SECONDS = 60.0
+MAX_PDFS = 3
+# Total per request. The PDFs travel inline as base64 (a third larger), within the API's limit.
+MAX_PDF_BYTES = 10 * 1024 * 1024
 AI_UNAVAILABLE_FLAG = "AI unavailable"
+PDF_DEADLINE_FLAG = "Deadline from attachment - check"
+PDFS_SKIPPED_FLAG = "Some PDFs not read by AI (more than 3 files or 10 MB)"
 
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ai")
 
@@ -45,8 +57,33 @@ class AIProvider(Protocol):
     model: str
 
     def extract(
-        self, masked_text: str, catalog: list[CatalogEntry], attachment_names: list[str]
+        self,
+        masked_text: str,
+        catalog: list[CatalogEntry],
+        attachment_names: list[str],
+        documents: Sequence[Attachment] = (),
     ) -> AIResult | None: ...
+
+
+def is_pdf(attachment: Attachment) -> bool:
+    return attachment.mime == "application/pdf" or attachment.filename.lower().endswith(".pdf")
+
+
+def pdf_documents(attachments: Sequence[Attachment]) -> tuple[list[Attachment], bool]:
+    """The PDFs the AI may read, in message order, within MAX_PDFS and MAX_PDF_BYTES; and
+    whether any PDF was left out. Attachments without bytes (names only) are not PDFs to read."""
+    picked: list[Attachment] = []
+    total = 0
+    skipped = False
+    for attachment in attachments:
+        if not attachment.data or not is_pdf(attachment):
+            continue
+        if len(picked) >= MAX_PDFS or total + attachment.size > MAX_PDF_BYTES:
+            skipped = True
+            continue
+        picked.append(attachment)
+        total += attachment.size
+    return picked, skipped
 
 
 # --- Prompt ------------------------------------------------------------------------------------
@@ -59,9 +96,21 @@ def catalog_lines(catalog: list[CatalogEntry]) -> str:
     )
 
 
-def build_prompt(masked_text: str, catalog: list[CatalogEntry], attachment_names: list[str]) -> str:
+def build_prompt(
+    masked_text: str,
+    catalog: list[CatalogEntry],
+    attachment_names: list[str],
+    documents: Sequence[Attachment] = (),
+) -> str:
     template = PROMPT_PATH.read_text(encoding="utf-8")
-    attachments = "\n".join(f"- {name}" for name in attachment_names) or "(none)"
+    sent = {document.filename for document in documents}
+    attachments = (
+        "\n".join(
+            f"- {name} (attached in full)" if name in sent else f"- {name} (name only)"
+            for name in attachment_names
+        )
+        or "(none)"
+    )
     return (
         template.replace("{{catalog}}", catalog_lines(catalog))
         .replace("{{attachments}}", attachments)
@@ -100,7 +149,11 @@ class NullProvider:
     model = ""
 
     def extract(
-        self, masked_text: str, catalog: list[CatalogEntry], attachment_names: list[str]
+        self,
+        masked_text: str,
+        catalog: list[CatalogEntry],
+        attachment_names: list[str],
+        documents: Sequence[Attachment] = (),
     ) -> AIResult | None:
         return None
 
@@ -147,7 +200,8 @@ class GeminiProvider:
         from google.genai import types
 
         http_options = types.HttpOptions(
-            timeout=int(TIMEOUT_SECONDS * 1000),
+            # The longest call (with PDFs); run_ai enforces the shorter limit for text only.
+            timeout=int(PDF_TIMEOUT_SECONDS * 1000),
             retry_options=types.HttpRetryOptions(attempts=1),
         )
         if self.mode == "vertex":
@@ -165,11 +219,29 @@ class GeminiProvider:
         return genai.Client(api_key=key, http_options=http_options)
 
     def extract(
-        self, masked_text: str, catalog: list[CatalogEntry], attachment_names: list[str]
+        self,
+        masked_text: str,
+        catalog: list[CatalogEntry],
+        attachment_names: list[str],
+        documents: Sequence[Attachment] = (),
     ) -> AIResult | None:
+        prompt = build_prompt(masked_text, catalog, attachment_names, documents)
+        content: str | list[dict[str, str]] = prompt
+        if documents:
+            content = [
+                {"type": "text", "text": prompt},
+                *(
+                    {
+                        "type": "document",
+                        "mime_type": "application/pdf",
+                        "data": base64.b64encode(document.data).decode("ascii"),
+                    }
+                    for document in documents
+                ),
+            ]
         interaction = self._get_client().interactions.create(
             model=self.model,
-            input=build_prompt(masked_text, catalog, attachment_names),
+            input=content,
             response_format={
                 "type": "text",
                 "mime_type": "application/json",
@@ -224,17 +296,27 @@ def _normalise_quote(text: str) -> str:
     return re.sub(r"\s+", " ", text.replace("*", "")).strip().casefold()
 
 
-def apply_guardrails(result: AIResult, original_text: str, catalog: list[CatalogEntry]) -> AIResult:
+def quote_in_text(quote: str | None, text: str) -> bool:
+    """The quote check ignores whitespace, line breaks, `*` emphasis and case, so a deadline that
+    wraps over two lines in the email still counts as word-for-word."""
+    return bool((quote or "").strip()) and _normalise_quote(quote or "") in _normalise_quote(text)
+
+
+def apply_guardrails(
+    result: AIResult,
+    original_text: str,
+    catalog: list[CatalogEntry],
+    documents_sent: bool = False,
+) -> AIResult:
     """Drop a deadline whose quote is not in the original text; unknown catalog IDs → NONE.
 
-    The quote check ignores whitespace, line breaks, `*` emphasis and case, so a deadline that
-    wraps over two lines in the email still counts as word-for-word.
+    When PDFs were sent, a quote that is not in the email may come from a PDF, which the service
+    cannot search: the deadline is kept if it has a quote, and `run_ai` flags it for a check.
     """
     updates: dict[str, Any] = {}
     quote = result.deadline_quote or ""
-    if result.deadline is not None and (
-        not quote.strip() or _normalise_quote(quote) not in _normalise_quote(original_text)
-    ):
+    in_email = quote_in_text(quote, original_text)
+    if result.deadline is not None and not in_email and not (documents_sent and quote.strip()):
         updates["deadline"] = None
     known = {entry.catalog_id for entry in catalog if not entry.is_adhoc}
     if result.catalog_id not in known:
@@ -263,11 +345,13 @@ def run_ai(
     attachment_names: list[str],
     timeout: float | None = None,
     tries: int = 2,
+    documents: Sequence[Attachment] = (),
 ) -> AIOutcome:
     """Call the provider with a timeout and one retry; never raises."""
     if isinstance(provider, NullProvider):
         return AIOutcome(None)
-    timeout = TIMEOUT_SECONDS if timeout is None else timeout
+    if timeout is None:
+        timeout = PDF_TIMEOUT_SECONDS if documents else TIMEOUT_SECONDS
     for attempt in range(1, tries + 1):
         started = time.monotonic()
         error_type = ""
@@ -275,7 +359,11 @@ def run_ai(
         result: AIResult | None = None
         try:
             future = _executor.submit(
-                provider.extract, masked_text[:MAX_INPUT_CHARS], catalog, attachment_names
+                provider.extract,
+                masked_text[:MAX_INPUT_CHARS],
+                catalog,
+                attachment_names,
+                documents,
             )
             result = future.result(timeout=timeout)
         except NotConfigured:
@@ -300,10 +388,17 @@ def run_ai(
                 "attempt": attempt,
                 "error_type": error_type,
                 "status": status,
+                "documents": len(documents),
             },
         )
         if success and result is not None:
-            return AIOutcome(apply_guardrails(result, original_text, catalog))
+            checked = apply_guardrails(result, original_text, catalog, bool(documents))
+            flags = []
+            if checked.deadline is not None and not quote_in_text(
+                checked.deadline_quote, original_text
+            ):
+                flags.append(PDF_DEADLINE_FLAG)
+            return AIOutcome(checked, flags)
         if error_type == "NotConfigured" or _permanent(status):
             break
     return AIOutcome(None, [AI_UNAVAILABLE_FLAG])

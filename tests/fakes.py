@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 from app.drive import Folder, folder_url
 from app.extract.ai import NotConfigured
-from app.models import AIResult, CatalogEntry
+from app.models import AIResult, Attachment, CatalogEntry
 from app.sheets import SheetStore, column_letter
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -241,12 +242,21 @@ class FakeAIProvider:
         self.calls: list[dict[str, Any]] = []
 
     def extract(
-        self, masked_text: str, catalog: list[CatalogEntry], attachment_names: list[str]
+        self,
+        masked_text: str,
+        catalog: list[CatalogEntry],
+        attachment_names: list[str],
+        documents: Sequence[Attachment] = (),
     ) -> AIResult | None:
         import time
 
         self.calls.append(
-            {"text": masked_text, "catalog": catalog, "attachments": attachment_names}
+            {
+                "text": masked_text,
+                "catalog": catalog,
+                "attachments": attachment_names,
+                "documents": [document.filename for document in documents],
+            }
         )
         if self.delay:
             time.sleep(self.delay)
