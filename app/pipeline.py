@@ -16,7 +16,7 @@ from datetime import date, timedelta
 from app import clock
 from app.drive import DriveStore, folder_name
 from app.extract import rules
-from app.extract.ai import AIProvider, run_ai
+from app.extract.ai import PDFS_SKIPPED_FLAG, AIProvider, pdf_documents, run_ai
 from app.extract.clean import (
     Unwrapped,
     clean_text,
@@ -149,12 +149,21 @@ def process_request(raw: RawRequest, services: Services, today: date | None = No
     # Recurring reports are generated from the Catalog, so there is nothing for the AI to read.
     if config.ai_provider != "Off" and raw.source != "Recurring":
         catalog = store.catalog()
+        # v1.2 item 11: an email's PDFs go to the AI as they are (Chat attachments carry no bytes).
+        documents, pdfs_skipped = (
+            pdf_documents(raw.attachments)
+            if config.ai_reads_pdfs and raw.source == "Email"
+            else ([], False)
+        )
+        if pdfs_skipped:
+            flags.append(PDFS_SKIPPED_FLAG)
         outcome = run_ai(
             services.ai,
             masked,
             light,
             catalog,
             [attachment.filename for attachment in raw.attachments],
+            documents=documents,
         )
         flags.extend(outcome.flags)
         ai = outcome.result

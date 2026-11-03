@@ -121,7 +121,8 @@ one alert. Against `GRC_Tracker_Tabs_v2.xlsx` that means:
       (`Gemini API key`, `Vertex` or `Off`; start with `Off`), `AI model` (blank =
       `gemini-3.8-flash`), `AI region` (Vertex mode only), `Sender name`, `Mask emails for AI`,
       `Requester domains` (e.g. `bri.co.id=BRI`), `Known requesters` (e.g. `BRI, OJK, HKMA`),
-      `Builder email`, `File storage` (`None` = no Drive, the default; `Drive` = task folders).
+      `Builder email`, `File storage` (`None` = no Drive, the default; `Drive` = task folders),
+      `AI reads PDFs` (blank or `Yes` = email PDFs go to Gemini unmasked; `No` = names only).
       `Gmail intake label` is no longer used and can be deleted.
 - [ ] Create hidden tabs `_state` (`ID, Status, Owner, Doer, Notified doer, Notified at`) and
       `_failures` (`Key, Count, Last error, Last at`).

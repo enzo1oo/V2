@@ -1,3 +1,4 @@
+import base64
 import json
 import logging
 from datetime import date
@@ -17,7 +18,7 @@ from app.extract.ai import (
     build_prompt,
     run_ai,
 )
-from app.models import AIResult, CatalogEntry
+from app.models import AIResult, Attachment, CatalogEntry
 from tests.fakes import FakeAIProvider
 
 CATALOG = [
@@ -269,3 +270,93 @@ def test_prompt_lists_only_non_adhoc_catalog_and_file_names():
     assert "- Form.xlsx" in prompt
     assert "Isi pesan" in prompt
     assert "{{" not in prompt
+
+
+# --- PDFs to the AI (v1.2 item 11) ---------------------------------------------------------------
+
+
+def attachment(name, mime="application/pdf", data=b"%PDF-1.4 fake"):
+    return Attachment(filename=name, mime=mime, data=data)
+
+
+def test_pdf_documents_picks_pdfs_within_limits(monkeypatch):
+    files = [
+        attachment("a.pdf"),
+        attachment("Form.xlsx", mime="application/vnd.ms-excel"),
+        attachment("b.PDF", mime="application/octet-stream"),  # by extension
+        attachment("names-only.pdf", data=b""),  # Chat placeholder: no bytes
+        attachment("c.pdf"),
+        attachment("d.pdf"),  # a fourth PDF is over MAX_PDFS
+    ]
+    picked, skipped = ai_module.pdf_documents(files)
+    assert [f.filename for f in picked] == ["a.pdf", "b.PDF", "c.pdf"] and skipped
+    monkeypatch.setattr(ai_module, "MAX_PDF_BYTES", 20)
+    picked, skipped = ai_module.pdf_documents([attachment("big.pdf", data=b"x" * 21)])
+    assert picked == [] and skipped
+    assert ai_module.pdf_documents([attachment("Form.xlsx", mime="x")]) == ([], False)
+
+
+def test_gemini_sends_pdfs_as_documents_next_to_the_prompt():
+    provider, client = gemini(valid_json())
+    pdf = attachment("Surat.pdf", data=b"%PDF-1.4 surat")
+    provider.extract("Isi pesan", CATALOG, ["Surat.pdf", "Form.xlsx"], [pdf])
+    content = client.interactions.create.call_args.kwargs["input"]
+    text, document = content
+    assert text["type"] == "text" and "Isi pesan" in text["text"]
+    assert "- Surat.pdf (attached in full)" in text["text"]
+    assert "- Form.xlsx (name only)" in text["text"]
+    assert document == {
+        "type": "document",
+        "mime_type": "application/pdf",
+        "data": base64.b64encode(b"%PDF-1.4 surat").decode("ascii"),
+    }
+
+
+def test_gemini_without_pdfs_sends_plain_text():
+    provider, client = gemini(valid_json())
+    provider.extract("Isi pesan", CATALOG, [])
+    assert isinstance(client.interactions.create.call_args.kwargs["input"], str)
+
+
+def test_deadline_quoted_from_a_pdf_is_kept_and_flagged():
+    from_pdf = result(deadline="2026-11-20", deadline_quote="paling lambat 20 November 2026")
+    provider = FakeAIProvider(from_pdf)
+    outcome = run_ai(provider, "x", ORIGINAL, CATALOG, ["a.pdf"], documents=[attachment("a.pdf")])
+    assert outcome.result.deadline == date(2026, 11, 20)
+    assert outcome.flags == [ai_module.PDF_DEADLINE_FLAG]
+    assert provider.calls[0]["documents"] == ["a.pdf"]
+    # the same answer without PDFs: the quote is not in the email, so the deadline is dropped
+    assert run_ai(FakeAIProvider(from_pdf), "x", ORIGINAL, CATALOG, []).result.deadline is None
+
+
+def test_deadline_quoted_from_the_email_is_not_flagged_when_pdfs_were_sent():
+    outcome = run_ai(
+        FakeAIProvider(result()), "x", ORIGINAL, CATALOG, ["a.pdf"], documents=[attachment("a.pdf")]
+    )
+    assert outcome.result.deadline == date(2026, 11, 6) and outcome.flags == []
+
+
+def test_pdf_deadline_without_a_quote_is_still_dropped():
+    no_quote = result(deadline="2026-11-20", deadline_quote=None)
+    outcome = run_ai(
+        FakeAIProvider(no_quote), "x", ORIGINAL, CATALOG, [], documents=[attachment("a.pdf")]
+    )
+    assert outcome.result.deadline is None and outcome.flags == []
+
+
+def test_pdf_calls_get_the_longer_timeout(monkeypatch):
+    seen = []
+    real = ai_module._executor.submit
+
+    class Future:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def result(self, timeout):
+            seen.append(timeout)
+            return self.inner.result()
+
+    monkeypatch.setattr(ai_module._executor, "submit", lambda *a: Future(real(*a)))
+    run_ai(FakeAIProvider(result()), "x", ORIGINAL, CATALOG, [])
+    run_ai(FakeAIProvider(result()), "x", ORIGINAL, CATALOG, [], documents=[attachment("a.pdf")])
+    assert seen == [ai_module.TIMEOUT_SECONDS, ai_module.PDF_TIMEOUT_SECONDS]

@@ -395,3 +395,60 @@ def test_file_storage_defaults_to_none():
 
     assert AppConfig.model_validate(config_values()).file_storage == "None"
     assert AppConfig.model_validate(config_values(**{"File storage": ""})).file_storage == "None"
+
+
+# --- PDFs to the AI (v1.2 item 11) ---------------------------------------------------------------
+
+LETTER = Attachment(filename="Surat_OJK.pdf", mime="application/pdf", data=b"%PDF-1.4 surat")
+SHEET = Attachment(filename="Form.xlsx", mime="application/vnd.ms-excel", data=b"xlsx")
+
+
+def set_config(services, name, value):
+    services.store.backend.tabs["Config"].append([name, value])
+    services.store.load()
+
+
+def test_email_pdfs_go_to_the_ai_other_files_by_name(fixture_text):
+    ai = FakeAIProvider(VALID_AI)
+    services = make_services(ai, "Gemini API key")
+    process_request(email(fixture_text("no_date.txt"), attachments=[LETTER, SHEET]), services)
+    [call] = ai.calls
+    assert call["documents"] == ["Surat_OJK.pdf"]
+    assert call["attachments"] == ["Surat_OJK.pdf", "Form.xlsx"]
+
+
+def test_ai_reads_pdfs_off_sends_names_only(fixture_text):
+    ai = FakeAIProvider(VALID_AI)
+    services = make_services(ai, "Gemini API key")
+    set_config(services, "AI reads PDFs", "FALSE")
+    process_request(email(fixture_text("no_date.txt"), attachments=[LETTER]), services)
+    assert ai.calls[0]["documents"] == []
+
+
+def test_chat_attachments_never_go_to_the_ai(fixture_text):
+    ai = FakeAIProvider(VALID_AI)
+    services = make_services(ai, "Gemini API key")
+    chat = email(fixture_text("no_date.txt"), attachments=[LETTER], source="Google Chat")
+    process_request(chat, services)
+    assert ai.calls[0]["documents"] == []
+
+
+def test_deadline_only_in_the_pdf_is_used_and_flagged(fixture_text):
+    from_pdf = {**VALID_AI, "deadline": "2026-11-20", "deadline_quote": "20 November 2026"}
+    services = make_services(FakeAIProvider(from_pdf), "Gemini API key")
+    process_request(email(fixture_text("no_date.txt"), attachments=[LETTER]), services)
+    task = only_task(services)
+    assert task.due_date == date(2026, 11, 20)
+    assert ai_module.PDF_DEADLINE_FLAG in task.flags
+    assert "No deadline found, default used" not in task.flags
+
+
+def test_too_many_pdfs_are_flagged(fixture_text):
+    ai = FakeAIProvider(VALID_AI)
+    services = make_services(ai, "Gemini API key")
+    pdfs = [
+        Attachment(filename=f"p{i}.pdf", mime="application/pdf", data=b"%PDF") for i in range(4)
+    ]
+    process_request(email(fixture_text("no_date.txt"), attachments=pdfs), services)
+    assert ai.calls[0]["documents"] == ["p0.pdf", "p1.pdf", "p2.pdf"]
+    assert ai_module.PDFS_SKIPPED_FLAG in only_task(services).flags

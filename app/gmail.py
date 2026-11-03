@@ -16,6 +16,7 @@ import base64
 import json
 import logging
 import threading
+import time
 from collections.abc import Callable
 from datetime import datetime
 from email.header import decode_header, make_header
@@ -53,6 +54,10 @@ FAILED_LABEL = "GRC/Failed"
 UNREAD, INBOX = "UNREAD", "INBOX"  # Gmail system labels
 MAX_FAILURES = 3
 MESSAGES_PER_RUN = 20
+# Stop starting new messages after this long, so a run with slow AI calls on PDFs (up to two
+# 60-second tries) still ends inside Cloud Run's and Scheduler's 300-second limit. The rest stay
+# unread for the next run.
+RUN_BUDGET_SECONDS = 150.0
 REPLY_NOTE_CHARS = 500
 _AUTO_SENDERS = ("mailer-daemon@", "postmaster@", "no-reply@", "noreply@", "do-not-reply@")
 
@@ -416,10 +421,15 @@ def _ignore_reason(message: GmailMessage, bot: str, config: AppConfig) -> str:
 
 
 def process_inbox(
-    gmail: GmailClient, services: Services, limit: int = MESSAGES_PER_RUN
+    gmail: GmailClient,
+    services: Services,
+    limit: int = MESSAGES_PER_RUN,
+    budget_seconds: float = RUN_BUDGET_SECONDS,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> InboxRun:
-    """Handle up to `limit` unread inbox messages. Stops on schema or Gmail auth errors, leaving
-    the remaining messages unread for the next run."""
+    """Handle up to `limit` unread inbox messages, starting no new one after `budget_seconds`.
+    Stops on schema or Gmail auth errors, leaving the remaining messages unread for the next run."""
+    started = monotonic()
     config = services.store.config()
     if not config.allowed_senders:
         # D16: an empty list allows nobody, so every message is ignored. Say so plainly.
@@ -427,6 +437,9 @@ def process_inbox(
     bot = gmail.address()
     run = InboxRun()
     for message_id in gmail.unread_inbox(limit):
+        if monotonic() - started > budget_seconds:
+            logger.info("run_budget_reached", extra={"budget_seconds": budget_seconds})
+            break
         run.messages += 1
         try:
             message = gmail.get_message(message_id)

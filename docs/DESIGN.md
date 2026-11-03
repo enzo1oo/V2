@@ -94,7 +94,8 @@ Existing: `Effort: Small/Medium/Large`, `Support share`, `Overload threshold`, `
 `Default due (days)`. (`Gmail intake label` is no longer used: the bot reads its whole inbox.)
 **New:** `Allowed senders`, `AI provider` (`Gemini API key` / `Vertex` / `Off`), `AI model`, `AI region`, `Sender name`,
 `Mask emails for AI` (Yes/No, default No). `AI model` default `gemini-3.8-flash`.
-**(v1.2)** `File storage` (`None` default / `Drive`).
+**(v1.2)** `File storage` (`None` default / `Drive`). **(v1.2 item 11)** `AI reads PDFs`
+(Yes/No, blank = Yes).
 **(v1.1)** `Requester domains` (`domain=Org` pairs, `;`-separated), `Known requesters`
 (comma-separated org names), `Builder email` (alert recipient), all optional.
 
@@ -202,9 +203,10 @@ class AIProvider(Protocol):
 `requester_org: str | None`, `contacts: list[{name, email}]`, `catalog_id: str` (an ID from the list
 or `NONE`), `language: "id" | "en" | "mixed"`.
 
-- Prompt lives in `prompts/extract_v1.md`; the version string is logged with each call.
+- Prompt lives in `prompts/extract_v2.md`; the version string is logged with each call.
 - Input: masked cleaned text (max 8,000 characters), Catalog IDs with report names, attachment file
-  names only. Never file contents.
+  names. **(v1.2 item 11)** An email's PDF attachments are also sent, unmasked, when Config `AI
+  reads PDFs` is on (the default). Other file types: names only.
 - `GeminiProvider`: `google-genai` SDK (`pip install -U google-genai`). Use the call style documented
   for the installed SDK version: current docs use `client.interactions.create(model=…, input=…,
   response_format={"type": "text", "mime_type": "application/json", "schema":
@@ -307,7 +309,7 @@ grc-tracker/
 │   ├── notify.py             # email templates
 │   ├── auth.py               # token verification
 │   ├── logs.py, alerts.py    # (v1.1) JSON logs, alert emails
-├── prompts/extract_v1.md
+├── prompts/extract_v2.md
 ├── apps_script/audit.gs
 ├── scripts/mint_gmail_token.py   # one-time OAuth consent for the bot mailbox
 ├── scripts/smoke_gemini.py       # (v1.2) one live Gemini call, run by hand
@@ -366,7 +368,7 @@ deadline is never proposed; Done-without-proof is the Apps Script's job (not the
 ## 13. Out of scope for v1
 
 WhatsApp bot, web dashboard, automatic assignment without approval, migrating 2026 history,
-reading attachment contents, multi-mailbox intake, reading Pak Dicki's personal inbox.
+reading attachment contents (except email PDFs, section 16 item 11), multi-mailbox intake, reading Pak Dicki's personal inbox.
 
 ## 14. Open items (build around them, do not block)
 
@@ -466,3 +468,19 @@ reading attachment contents, multi-mailbox intake, reading Pak Dicki's personal 
    Build trigger on `main` using `cloudbuild.yaml` (tests first; a build without `_SHEET_ID`
    stops). The data-residency side of Jakarta is part of the D18 Compliance check.
 10. **Health check:** `GET /health` (same as `/healthz`, which Cloud Run may intercept).
+11. **The AI reads email PDFs (approved by the project owner, 3 Nov 2026).** Replaces "never file
+    contents" (section 6) and takes "reading attachment contents" out of section 13 for PDFs.
+    - Up to 3 PDFs per email, 10 MB in total, are sent to Gemini as documents next to the masked
+      text (`extract_v2` prompt), so it can read the report type, deadline and deliverables. PDFs
+      over the limit are not sent and the task is flagged `Some PDFs not read by AI …`. Chat
+      attachments are never sent (the Chat bot does not download them). Other file types: names
+      only.
+    - **PDF contents are not masked.** Names, phone numbers and staff data in a PDF reach Google
+      as they are. This belongs to the D18 Compliance check. Config `AI reads PDFs` = No turns it
+      off without a code change.
+    - Deadline: the email's deadline wins over a PDF's. A deadline whose quote is not in the email
+      text (so it came from a PDF the service cannot search) is kept only if the AI gives a quote,
+      and the task is flagged `Deadline from attachment - check`.
+    - Calls with PDFs get a 60 s timeout (text only stays 20 s; one retry either way). A Gmail
+      run starts no new message after 150 s, so it ends inside the 300 s Cloud Run and Scheduler
+      limits; the rest stay unread for the next run.

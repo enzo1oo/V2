@@ -90,7 +90,7 @@ Build:
 - app/extract/ai.py: AIProvider protocol, AIResult model, NullProvider, BriAgentProvider stub
   (raises NotConfigured), VertexGeminiProvider (google-genai in Vertex mode, JSON schema, temperature
   0, 20 s timeout, 1 retry), guardrails, and FakeAIProvider for tests.
-- prompts/extract_v1.md: the extraction prompt (Indonesian and English input, output schema,
+- prompts/extract_v1.md (now extract_v2.md, section 16 item 11): the extraction prompt (Indonesian and English input, output schema,
   "choose catalog_id only from the list or NONE", "deadline_quote must be copied exactly").
 - app/pipeline.py: process_request(raw) running steps 1–11.
 - Tests: the full section 12 acceptance list with fakes, including AI off, valid fake AI, AI with a

@@ -501,3 +501,13 @@ def test_acknowledgement_without_file_storage():
     result = TaskResult(task_id="G-0001", created=True, title="T", files_url="")
     original = type("M", (), {"subject": "Req", "sender_email": "a@example.com"})()
     assert "Files: none" in acknowledgement_email(result, original).text
+
+
+def test_run_starts_no_new_message_after_the_time_budget():
+    gmail = FakeGmailClient()
+    for i in range(3):
+        gmail.add(f"m{i}", body_text=f"Tolong cek printer {i}")
+    ticks = iter([0.0, 0.0, 10.0, 200.0])  # start, before m0, before m1, before m2
+    run = process_inbox(gmail, services(), budget_seconds=150, monotonic=lambda: next(ticks))
+    assert (run.messages, run.created) == (2, 2)
+    assert "UNREAD" in gmail.labels("m2")  # left for the next run

@@ -354,6 +354,8 @@ class AppConfig(_SheetRow):
     allowed_senders: list[str] = Field(default_factory=list, alias="Allowed senders")
     # v1.2 decision A: no Drive by default. `Drive` turns task folders back on (DESIGN D5).
     file_storage: Literal["Drive", "None"] = Field(default="None", alias="File storage")
+    # v1.2 item 11: email PDFs go to the AI unmasked. Blank or missing = on; FALSE/No turns it off.
+    ai_reads_pdfs: bool = Field(default=True, alias="AI reads PDFs")
 
     _lists = field_validator("known_requesters", mode="before")(_split_list)
 
@@ -373,7 +375,9 @@ class AppConfig(_SheetRow):
         domain = "@" + email.rpartition("@")[2]
         return any(entry in (email, domain) for entry in self.allowed_senders)
 
-    @field_validator("ai_provider", "ai_model", "sender_name", "file_storage", mode="before")
+    @field_validator(
+        "ai_provider", "ai_model", "sender_name", "file_storage", "ai_reads_pdfs", mode="before"
+    )
     @classmethod
     def _blank_uses_default(cls, value: object, info: ValidationInfo) -> object:
         if _blank_to_none(value) is None and info.field_name:

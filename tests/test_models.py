@@ -133,3 +133,14 @@ def test_ai_result_trims_long_title():
 def test_ai_result_strict(overrides):
     with pytest.raises(ValidationError):
         _ai(**overrides)
+
+
+def test_ai_reads_pdfs_blank_means_on_and_no_turns_it_off():
+    from tests.fakes import FakeSheetsBackend, FakeSheetStore
+
+    for value, expected in (("", True), ("Yes", True), ("FALSE", False), ("No", False)):
+        backend = FakeSheetsBackend.from_fixtures()
+        backend.tabs["Config"].append(["AI reads PDFs", value])
+        store = FakeSheetStore(backend)
+        store.load()
+        assert store.config().ai_reads_pdfs is expected
