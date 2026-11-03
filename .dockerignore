@@ -9,3 +9,5 @@ tests
 docs
 scripts
 apps_script
+deploy
+secrets

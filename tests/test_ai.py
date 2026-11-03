@@ -202,7 +202,7 @@ def test_transient_errors_are_retried_once(status):
 
 def test_missing_key_is_not_configured(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    provider = ai_module.provider_from_config("Gemini API key", "", "", "proj", key_secret="")
+    provider = ai_module.provider_from_config("Gemini API key", "", "", "proj", api_key="")
     outcome = run_ai(provider, "x", "x", CATALOG, [])
     assert outcome.flags == [AI_UNAVAILABLE_FLAG]
 

@@ -13,7 +13,6 @@ A failing message stays unread in the inbox and is retried; after 3 failures it 
 from __future__ import annotations
 
 import base64
-import json
 import logging
 import threading
 import time
@@ -31,6 +30,7 @@ from app.extract.clean import strip_noise
 from app.models import AppConfig, Attachment, AuditEntry, FailureRow, OutgoingEmail, RawRequest
 from app.notify import acknowledgement_email
 from app.pipeline import SERVICE_USER, Services, process_request
+from app.settings import Settings
 from app.sheets import SchemaError
 
 __all__ = ["GmailAuthError", "GmailClient", "GmailMessage", "OutgoingEmail", "process_inbox"]
@@ -239,16 +239,14 @@ class GoogleGmailClient:
         self._address: str | None = None
 
     @classmethod
-    def from_secrets(cls, token_secret: str, client_secret: str) -> GoogleGmailClient:
+    def from_settings(cls, settings: Settings) -> GoogleGmailClient:
+        """GMAIL_REFRESH_TOKEN and the OAuth client JSON, both injected from Secret Manager."""
         from google.oauth2.credentials import Credentials
 
-        from app.settings import read_secret
-
-        client = json.loads(read_secret(client_secret))
-        client = client.get("installed") or client.get("web") or client
+        client = settings.oauth_client()
         credentials = Credentials(
             token=None,
-            refresh_token=read_secret(token_secret).strip(),
+            refresh_token=settings.gmail_refresh_token.get_secret_value().strip(),
             client_id=client["client_id"],
             client_secret=client["client_secret"],
             token_uri=client.get("token_uri", "https://oauth2.googleapis.com/token"),

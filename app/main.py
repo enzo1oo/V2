@@ -1,24 +1,28 @@
 """FastAPI routes. Each call builds a fresh Runtime, so every run starts with one sheet read.
 
-/jobs/* needs a Cloud Scheduler OIDC token and /chat a Google Chat token (app/auth.py);
+/jobs/* needs a Cloud Scheduler OIDC token, /tasks/* a Cloud Tasks OIDC token and /chat a Google
+Chat token (app/auth.py); /wa/webhook checks Meta's signature (app/whatsapp.py, v1.3);
 /health and /healthz are open and return no data (Cloud Run reserves some paths ending in
 "z", so /health is the one to use there; /healthz stays for DESIGN section 7).
 """
 
 from __future__ import annotations
 
+import json
 import logging
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
+from pydantic import ValidationError
 
 from app.alerts import send_alert
-from app.auth import require_chat, require_scheduler
+from app.auth import require_chat, require_scheduler, require_task
 from app.chat import ChatClient, GoogleChatClient, handle_event
 from app.drive import DriveStore, GoogleDriveStore, NoFileStorage
 from app.extract.ai import provider_from_config
@@ -26,15 +30,93 @@ from app.gmail import GmailAuthError, GmailClient, GoogleGmailClient, process_in
 from app.jobs import run_changes, run_digest, run_recurring
 from app.logs import setup_logging
 from app.pipeline import Services
-from app.settings import Settings, get_settings
+from app.settings import Settings, get_settings, missing_settings
 from app.sheets import GoogleSheetsBackend, SchemaError, SheetStore
+from app.whatsapp import (
+    CloudTasksQueue,
+    GraphWhatsApp,
+    TaskQueue,
+    WaContext,
+    WhatsAppClient,
+    handle_task,
+    parse_webhook,
+    run_wa_drafts,
+    run_wa_reminders,
+    signature_ok,
+    verify_challenge,
+)
 
 logger = logging.getLogger("grc.main")
 
 
+@dataclass
+class Health:
+    """The startup check: missing variable names and sheet problems (names only, no values)."""
+
+    missing: list[str]
+    sheet: list[str]
+    checked_at: float
+
+    @property
+    def ok(self) -> bool:
+        return not self.missing and not self.sheet
+
+
+RECHECK_SECONDS = 60.0
+_health: Health | None = None
+
+
+def _sheet_store(settings: Settings) -> SheetStore:
+    return SheetStore(GoogleSheetsBackend(settings.sheet_id))
+
+
+def check_startup(
+    settings: Settings, store_factory: Callable[[Settings], SheetStore] = _sheet_store
+) -> Health:
+    """Every required variable set, and the sheet has every required tab, column and setting.
+    Never raises: a broken setup must still boot so /health can say what is wrong."""
+    missing = missing_settings(settings)
+    sheet: list[str] = []
+    if "SHEET_ID" not in missing:
+        try:
+            store = store_factory(settings)
+            store.load()
+            config = store.config()
+            if config.ai_provider == "Gemini API key" and not (
+                settings.gemini_api_key.get_secret_value()
+            ):
+                missing.append("GEMINI_API_KEY")
+            if config.file_storage == "Drive" and not settings.shared_drive_folder_id:
+                missing.append("SHARED_DRIVE_FOLDER_ID")
+            if settings.wa_enabled:
+                store.wa_pending()
+        except SchemaError as error:
+            sheet = list(error.problems)
+        except Exception as error:  # unreachable, not shared with the runtime account, ...
+            sheet = [f"sheet not readable: {type(error).__name__}"]
+    for name in missing:
+        logger.error("startup_missing_setting", extra={"reason": name})
+    for problem in sheet:
+        logger.error("startup_sheet_problem", extra={"reason": problem})
+    return Health(missing, sheet, time.monotonic())
+
+
+def current_health() -> Health | None:
+    """The startup result; sheet problems are re-checked at most once a minute, so fixing the
+    sheet needs no redeploy (missing variables do: they only change with a new revision)."""
+    global _health
+    health = _health
+    stale = health is not None and time.monotonic() - health.checked_at > RECHECK_SECONDS
+    if stale and health is not None and health.sheet and not health.missing:
+        _health = health = check_startup(get_settings())
+    return health
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    global _health
     setup_logging()
+    _health = await run_in_threadpool(check_startup, get_settings())
     yield
 
 
@@ -50,6 +132,8 @@ class Runtime:
     drive: DriveStore
     gmail: GmailClient
     chat: ChatClient
+    wa: WhatsAppClient | None = None  # v1.3; None when the WA_* settings are not set
+    queue: TaskQueue | None = None
 
     def services(self) -> Services:
         config = self.store.config()
@@ -58,12 +142,52 @@ class Runtime:
             config.ai_model,
             config.ai_region,
             self.settings.gcp_project,
-            self.settings.gemini_key_secret,
+            self.settings.gemini_api_key.get_secret_value(),
         )
         return Services(store=self.store, drive=self.drive, ai=ai)
 
+    def wa_context(self) -> WaContext | None:
+        if self.wa is None or self.queue is None:
+            return None
+        return WaContext(services=self.services(), wa=self.wa, queue=self.queue)
+
 
 _gmail_client: GmailClient | None = None
+_wa_links: tuple[WhatsAppClient, TaskQueue] | None = None
+
+
+@dataclass
+class WaLinks:
+    """What the WhatsApp webhook needs: settings and the queue (no Sheets or Gmail)."""
+
+    settings: Settings
+    wa: WhatsAppClient | None
+    queue: TaskQueue | None
+
+
+def get_wa_links() -> WaLinks:
+    global _wa_links
+    settings = get_settings()
+    if not settings.wa_enabled:
+        return WaLinks(settings, None, None)
+    if _wa_links is None:
+        _wa_links = (
+            GraphWhatsApp(
+                settings.wa_phone_number_id, settings.wa_access_token, settings.wa_graph_version
+            ),
+            CloudTasksQueue(
+                project=settings.gcp_project,
+                region=settings.gcp_region,
+                queue=settings.wa_tasks_queue or "wa-process",
+                target_url=f"{settings.service_url}/tasks/wa-process",
+                service_account_email=settings.runtime_sa_email,
+                audience=settings.service_url,
+            ),
+        )
+    return WaLinks(settings, *_wa_links)
+
+
+WaLinksDep = Annotated[WaLinks, Depends(get_wa_links)]
 
 
 def get_runtime() -> Runtime:
@@ -71,11 +195,12 @@ def get_runtime() -> Runtime:
     global _gmail_client
     settings = get_settings()
     if _gmail_client is None:
-        _gmail_client = GoogleGmailClient.from_secrets(
-            settings.gmail_token_secret, settings.oauth_client_secret
-        )
+        _gmail_client = GoogleGmailClient.from_settings(settings)
+    links = get_wa_links()
     return Runtime(
         settings=settings,
+        wa=links.wa,
+        queue=links.queue,
         store=SheetStore(GoogleSheetsBackend(settings.sheet_id)),
         drive=(
             GoogleDriveStore(settings.shared_drive_folder_id)
@@ -114,10 +239,14 @@ def _job_error(job: str, error: Exception, runtime: Runtime) -> JSONResponse:
 jobs = APIRouter(prefix="/jobs", dependencies=[Depends(require_scheduler)])
 
 
-@app.get("/health")
-@app.get("/healthz")
-def healthz() -> dict[str, str]:
-    return {"status": "ok"}
+@app.get("/health", response_model=None)
+@app.get("/healthz", response_model=None)
+def healthz() -> dict[str, str] | JSONResponse:
+    health = current_health()
+    if health is None or health.ok:
+        return {"status": "ok"}
+    content = {"status": "unhealthy", "missing": health.missing, "sheet": health.sheet}
+    return JSONResponse(content, status_code=503)
 
 
 @jobs.post("/gmail", response_model=None)
@@ -163,7 +292,106 @@ def digest_job(runtime: RuntimeDep) -> dict[str, object] | JSONResponse:
     return {"job": "digest", **run.model_dump()}
 
 
+@jobs.post("/wa-reminders", response_model=None)
+def wa_reminders_job(runtime: RuntimeDep) -> dict[str, object] | JSONResponse:
+    if runtime.wa is None:
+        return {"job": "wa-reminders", "skipped": "WhatsApp not configured"}
+    try:
+        runtime.store.load()
+        run = run_wa_reminders(runtime.store, runtime.wa, runtime.settings.sheet_url)
+    except SchemaError as error:
+        return _job_error("wa-reminders", error, runtime)
+    return {"job": "wa-reminders", **run.model_dump()}
+
+
+@jobs.post("/wa-drafts", response_model=None)
+def wa_drafts_job(runtime: RuntimeDep) -> dict[str, object] | JSONResponse:
+    try:
+        runtime.store.load()
+        context = runtime.wa_context()
+        if context is None:
+            return {"job": "wa-drafts", "skipped": "WhatsApp not configured"}
+        run = run_wa_drafts(context)
+    except SchemaError as error:
+        return _job_error("wa-drafts", error, runtime)
+    return {"job": "wa-drafts", **run.model_dump()}
+
+
 app.include_router(jobs)
+
+
+# --- WhatsApp (v1.3, DESIGN section 17) ----------------------------------------------------------
+
+
+@app.get("/wa/webhook", response_model=None)
+def wa_verify(request: Request, links: WaLinksDep) -> PlainTextResponse:
+    if not links.settings.wa_enabled:
+        return PlainTextResponse("not configured", status_code=404)
+    challenge = verify_challenge(dict(request.query_params), links.settings.wa_verify_token)
+    if challenge is None:
+        logger.warning("wa_verify_refused")
+        return PlainTextResponse("forbidden", status_code=403)
+    return PlainTextResponse(challenge)
+
+
+@app.post("/wa/webhook", response_model=None)
+async def wa_webhook(request: Request, links: WaLinksDep) -> dict[str, object] | JSONResponse:
+    """Check Meta's signature, queue each message, answer at once (Meta resends slow calls)."""
+    settings = links.settings
+    if not settings.wa_enabled or links.queue is None:
+        return JSONResponse({"error": "not configured"}, status_code=404)
+    body = await request.body()
+    signature = request.headers.get("x-hub-signature-256")
+    if not signature_ok(settings.wa_app_secret.get_secret_value(), body, signature):
+        logger.warning("wa_bad_signature")
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return {"ok": True}
+    messages = parse_webhook(payload, settings.wa_phone_number_id)
+    queue = links.queue
+    try:
+        for message in messages:
+            task = {"kind": "message", "message": message.model_dump(mode="json")}
+            await run_in_threadpool(queue.enqueue, task)
+    except Exception as error:  # 500 makes Meta resend; the message IDs dedupe (D15)
+        logger.error("wa_enqueue_failed", extra={"error_type": type(error).__name__})
+        return JSONResponse({"error": "retry"}, status_code=500)
+    logger.info("wa_webhook", extra={"n_messages": len(messages)})
+    return {"ok": True}
+
+
+tasks = APIRouter(prefix="/tasks", dependencies=[Depends(require_task)])
+
+
+@tasks.post("/wa-process", response_model=None)
+async def wa_process(request: Request, runtime: RuntimeDep) -> dict[str, object] | JSONResponse:
+    payload = await request.json()
+    return await run_in_threadpool(_handle_wa_task, payload, runtime)
+
+
+def _handle_wa_task(
+    payload: dict[str, object], runtime: Runtime
+) -> dict[str, object] | JSONResponse:
+    """Other errors raise: the 500 makes Cloud Tasks retry, and the drafts job is the backstop."""
+    try:
+        runtime.store.load()
+        context = runtime.wa_context()
+        if context is None:
+            return {"ok": False, "skipped": "WhatsApp not configured"}
+        outcome = handle_task(payload, context)
+    except SchemaError as error:
+        _log_schema_error("wa", error)
+        return JSONResponse({"error": "schema_error"}, status_code=500)
+    except ValidationError:  # a malformed task would fail on every retry
+        logger.error("wa_bad_task")
+        return {"ok": False}
+    logger.info("wa_task", extra={"kind": str(payload.get("kind", "")), "reason": outcome})
+    return {"ok": True, "outcome": outcome}
+
+
+app.include_router(tasks)
 
 
 @app.post("/chat", dependencies=[Depends(require_chat)])

@@ -1,6 +1,6 @@
 # CLAUDE.md — grc-tracker
 
-Service that logs GRC requests (Gmail, Google Chat) into a Google Sheet, proposes an owner by fixed
+Service that logs GRC requests (Gmail, Google Chat, WhatsApp) into a Google Sheet, proposes an owner by fixed
 rules, and sends assignment emails and reminders. Runs on Google Cloud Run for BRI Global Financial
 Services, Hong Kong.
 
@@ -14,12 +14,13 @@ wrong, stop and ask; do not invent behaviour.**
 - Keep `extract/rules.py`, `extract/clean.py` and `route.py` pure (no network, no Google clients) so
   they are fully unit-testable.
 - All Google APIs sit behind small classes (`SheetStore`, `DriveStore`, `GmailClient`, `ChatClient`,
-  `AIProvider`) with fakes in `tests/fakes.py`. Tests never touch the network.
+  `AIProvider`, and for WhatsApp `WhatsAppClient` and `TaskQueue`) with fakes in `tests/fakes.py`.
+  Tests never touch the network.
 - Time zone `Asia/Hong_Kong`. Never use naive "today" outside one `clock` helper that tests can freeze.
 - No secrets in code, tests, fixtures, logs or committed files. Secrets come from Secret Manager.
-- The Gemini API key: in production from Secret Manager (`GEMINI_KEY_SECRET`); locally only from the
-  `GEMINI_API_KEY` environment variable in a git-ignored `.env`. Never ask the user to paste the key,
-  never print it, never write it to a file. Create `.gitignore` with `.env` in Phase 1.
+- The Gemini API key: the `GEMINI_API_KEY` environment variable, injected by Cloud Run from Secret
+  Manager in production (DESIGN section 18) and from a git-ignored `.env` locally. Never ask the
+  user to paste the key, never print it, never write it to a file. Create `.gitignore` with `.env` in Phase 1.
 - Live Gemini calls may fail from Hong Kong ("location not supported"); tests use FakeAIProvider.
 - Never log message text, names, emails or phone numbers. Log task IDs, counts, timings, error types.
 - Test data is fake or masked. Never add real BRI messages, names or numbers to the repo.

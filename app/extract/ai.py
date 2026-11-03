@@ -32,8 +32,8 @@ from app.models import DEFAULT_AI_MODEL, AIResult, Attachment, CatalogEntry
 
 logger = logging.getLogger("grc.ai")
 
-PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "extract_v2.md"
-PROMPT_VERSION = "extract_v2"
+PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "extract_v3.md"
+PROMPT_VERSION = "extract_v3"
 MAX_INPUT_CHARS = 8_000
 TIMEOUT_SECONDS = 20.0
 # Reading PDFs takes longer than reading text; the Gmail run's time budget (gmail.py) allows it.
@@ -257,7 +257,8 @@ class GeminiProvider:
 
 
 def gemini_api_key(secret_name: str, project: str) -> Callable[[], str]:
-    """The key loader: GEMINI_API_KEY (local .env) first, else Secret Manager. Never logged."""
+    """Key loader for scripts: GEMINI_API_KEY (local .env) first, else Secret Manager by name.
+    The service itself gets the key from its settings. Never logged."""
 
     def load() -> str:
         local = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -273,11 +274,12 @@ def gemini_api_key(secret_name: str, project: str) -> Callable[[], str]:
 
 
 def provider_from_config(
-    provider: str, model: str, region: str, project: str, key_secret: str = ""
+    provider: str, model: str, region: str, project: str, api_key: str = ""
 ) -> AIProvider:
-    """Config `AI provider` → provider. Switching mode is a Config change, not a code change."""
+    """Config `AI provider` → provider. Switching mode is a Config change, not a code change.
+    `api_key` is GEMINI_API_KEY from the settings (injected from Secret Manager on Cloud Run)."""
     if provider == "Gemini API key":
-        return GeminiProvider("api_key", model, api_key=gemini_api_key(key_secret, project))
+        return GeminiProvider("api_key", model, api_key=lambda: api_key)
     if provider == "Vertex":
         return GeminiProvider("vertex", model, project=project, region=region)
     return NullProvider()

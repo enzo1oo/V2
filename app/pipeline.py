@@ -26,7 +26,7 @@ from app.extract.clean import (
     unwrap_forward,
 )
 from app.models import AuditEntry, Contact, RawRequest, Task, TaskResult
-from app.route import route
+from app.route import route, sender_assignment
 from app.sheets import SheetStore
 
 logger = logging.getLogger("grc.pipeline")
@@ -83,6 +83,8 @@ def _files_note(raw: RawRequest) -> str:
     names = ", ".join(attachment.filename for attachment in raw.attachments)
     if raw.source == "Email":
         return f"In the original email in the GRC bot mailbox: {names}"
+    if raw.source == "WhatsApp":
+        return f"In the WhatsApp chat with the bot: {names}"
     return f"Not stored: {names}"
 
 
@@ -121,6 +123,14 @@ def process_request(raw: RawRequest, services: Services, today: date | None = No
     light = strip_noise(body)
     cleaned = clean_text(body)
     masked = mask_text(cleaned, mask_emails=config.mask_emails_for_ai)
+    # A WhatsApp PROMPT (v1.3) guides the AI only; the rules read the forwarded request alone.
+    note = raw.sender_note.strip()
+    ai_text = masked
+    quote_text = light
+    if note:
+        masked_note = mask_text(note, mask_emails=config.mask_emails_for_ai)
+        ai_text = f"{masked}\n\nSender's instructions: {masked_note}"
+        quote_text = f"{light}\n{note}"
 
     # 5. Rules.
     letter = rules.letter_ref(light)
@@ -149,18 +159,19 @@ def process_request(raw: RawRequest, services: Services, today: date | None = No
     # Recurring reports are generated from the Catalog, so there is nothing for the AI to read.
     if config.ai_provider != "Off" and raw.source != "Recurring":
         catalog = store.catalog()
-        # v1.2 item 11: an email's PDFs go to the AI as they are (Chat attachments carry no bytes).
+        # v1.2 item 11: an email's (and v1.3 a WhatsApp message's) PDFs go to the AI as they are.
+        # Chat attachments carry no bytes.
         documents, pdfs_skipped = (
             pdf_documents(raw.attachments)
-            if config.ai_reads_pdfs and raw.source == "Email"
+            if config.ai_reads_pdfs and raw.source in ("Email", "WhatsApp")
             else ([], False)
         )
         if pdfs_skipped:
             flags.append(PDFS_SKIPPED_FLAG)
         outcome = run_ai(
             services.ai,
-            masked,
-            light,
+            ai_text,
+            quote_text,
             catalog,
             [attachment.filename for attachment in raw.attachments],
             documents=documents,
@@ -218,6 +229,8 @@ def process_request(raw: RawRequest, services: Services, today: date | None = No
         ai_catalog_id=ai_catalog_id,
         known_catalog_id=raw.catalog_id,
     )
+    if raw.assign_to:
+        routed = sender_assignment(routed, raw.assign_to, store.staff(), today, due_date)
     flags.extend(routed.flags)
 
     # 10. Write the row, then AuditLog.
@@ -227,6 +240,8 @@ def process_request(raw: RawRequest, services: Services, today: date | None = No
         where = "full text in Files" if folder else "full text only in the original email"
         flags.append(f"Original message cut to {MAX_CELL_CHARS:,} characters, {where}")
     notes = f"Manager note: {unwrapped.manager_note}" if unwrapped.manager_note else ""
+    if note:
+        notes = "\n".join(part for part in (notes, f"Sender's PROMPT: {note}") if part)
     source = raw.source_id if raw.source == "Recurring" else raw.source
     task = Task(
         title=title,

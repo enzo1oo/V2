@@ -83,6 +83,59 @@ def find_person(name: str, staff: list[StaffMember]) -> StaffMember | None:
     return next((person for person in staff if person.name.strip().casefold() == wanted), None)
 
 
+def match_staff_name(name: str, staff: list[StaffMember]) -> StaffMember | None:
+    """A name typed by a person (WhatsApp PROMPT): the full name, else a unique first name,
+    else a unique start of a full name; case-insensitive. Ambiguous or unknown → None."""
+    wanted = _normalise(name).strip(" .,!")
+    if not wanted:
+        return None
+    exact = find_person(wanted, staff)
+    if exact is not None:
+        return exact
+    for matches in (
+        [p for p in staff if _normalise(p.name).split(" ")[:1] == [wanted]],
+        [p for p in staff if _normalise(p.name).startswith(wanted)],
+    ):
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            return None
+    return None
+
+
+def sender_assignment(
+    routed: RouteResult,
+    name: str,
+    staff: list[StaffMember],
+    today: date,
+    due: date | None,
+) -> RouteResult:
+    """Apply "assign this to <name>" from the sender's WhatsApp PROMPT (v1.3).
+
+    A person chose, not the AI, and the task still waits for the manager's approval. The rules'
+    proposal is kept in the routing note. An unknown name leaves the rules' result and flags it.
+    """
+    person = match_staff_name(name, staff)
+    if person is None:
+        return routed.model_copy(
+            update={"flags": [*routed.flags, f'PROMPT: "{name.strip()}" not found in Staff']}
+        )
+    flags = [flag for flag in routed.flags if flag != NEEDS_REVIEW_FLAG]
+    reason = unavailable_reason(person, today, due)
+    if reason:
+        flags.append(f"Assigned by sender: {person.name} {reason}")
+    rules_said = routed.owner or "nobody"
+    note = f"Assigned by sender (WhatsApp PROMPT) to {person.name}; rules proposed {rules_said}"
+    return RouteResult(
+        owner=person.name,
+        division=routed.division or person.main_division or None,
+        catalog_id=routed.catalog_id,
+        rule=0,
+        note=f"{note} ({routed.note})",
+        flags=flags,
+    )
+
+
 def unavailable_reason(person: StaffMember, today: date, due: date | None) -> str | None:
     """Why `person` cannot be proposed, or None if available."""
     if person.role == "Manager":

@@ -20,7 +20,7 @@ from typing import Any, Protocol
 
 from app import clock
 from app.gmail import GmailClient, OutgoingEmail
-from app.models import OPEN_STATUSES, Attachment, RawRequest, TaskResult
+from app.models import OPEN_STATUSES, Attachment, RawRequest, StaffMember, TaskResult
 from app.pipeline import Services, process_request
 from app.route import find_person
 
@@ -152,6 +152,11 @@ def my_tasks_text(services: Services, email: str) -> str:
     person = next((p for p in services.store.staff() if p.email.strip().lower() == email), None)
     if person is None:
         return "I can't find your email in the Staff tab. Ask the GRC manager to add it."
+    return person_tasks_text(services, person)
+
+
+def person_tasks_text(services: Services, person: StaffMember) -> str:
+    """`my tasks` for one Staff member (Chat, and WhatsApp in v1.3)."""
     tasks = [
         task
         for task in services.store.tasks()

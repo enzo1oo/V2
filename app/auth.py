@@ -1,7 +1,9 @@
-"""Token checks (DESIGN section 9). Every /jobs/* call needs a Cloud Scheduler OIDC token and every
-/chat call a Google Chat token; anything else gets 401 with no detail. /health(z) is open.
+"""Token checks (DESIGN section 9). Every /jobs/* call needs a Cloud Scheduler OIDC token, every
+/tasks/* call (v1.3) a Cloud Tasks OIDC token and every /chat call a Google Chat token; anything
+else gets 401 with no detail. /health(z) is open; /wa/webhook checks Meta's signature itself.
 
 - Scheduler: Google-signed ID token, audience = SERVICE_URL, email = SCHEDULER_SA_EMAIL (verified).
+- Cloud Tasks: the same, with email = RUNTIME_SA_EMAIL (tasks run as the runtime account).
 - Chat: token signed by chat@system.gserviceaccount.com, audience = CHAT_PROJECT_NUMBER.
 
 Google's public certificates are fetched with the standard library and cached for an hour.
@@ -73,15 +75,21 @@ class TokenVerifier:
         except Exception as error:  # bad signature, expired, wrong audience, malformed
             raise Unauthorized(type(error).__name__) from None
 
-    def verify_scheduler(self, authorization: str | None) -> None:
+    def _verify_google(self, authorization: str | None, expected_email: str) -> None:
         claims = self._decode(authorization, GOOGLE_CERTS_URL, self._settings.service_url)
         if claims.get("iss") not in GOOGLE_ISSUERS:
             raise Unauthorized("issuer")
-        expected = self._settings.scheduler_sa_email.strip().lower()
+        expected = expected_email.strip().lower()
         if not expected or str(claims.get("email", "")).lower() != expected:
             raise Unauthorized("email")
         if claims.get("email_verified") is not True:
             raise Unauthorized("email not verified")
+
+    def verify_scheduler(self, authorization: str | None) -> None:
+        self._verify_google(authorization, self._settings.scheduler_sa_email)
+
+    def verify_task(self, authorization: str | None) -> None:
+        self._verify_google(authorization, self._settings.runtime_sa_email)
 
     def verify_chat(self, authorization: str | None) -> None:
         claims = self._decode(authorization, CHAT_CERTS_URL, self._settings.chat_project_number)
@@ -114,6 +122,15 @@ def require_scheduler(
         verifier.verify_scheduler(authorization)
     except Unauthorized as error:
         raise _reject("scheduler", error) from None
+
+
+def require_task(
+    verifier: VerifierDep, authorization: Annotated[str | None, Header()] = None
+) -> None:
+    try:
+        verifier.verify_task(authorization)
+    except Unauthorized as error:
+        raise _reject("task", error) from None
 
 
 def require_chat(

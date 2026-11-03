@@ -73,37 +73,87 @@ message, and the Drive folder, and never prints a secret. Steps that write are o
 `--write-drive` (creates and deletes a test folder), `--send-to <address>` (one test email) and
 `--gmail-once` (real intake of one unread email: writes to the sheet, so use the dev sheet).
 
-### Environment variables (IDs only, never secrets)
+### Environment variables
 
-| Variable | Example | Used for |
-|---|---|---|
-| `GCP_PROJECT` | `bri-hk-grc` | Secret Manager, Vertex AI |
-| `GCP_REGION` | `asia-southeast2` | informational |
-| `SHEET_ID` | `1AbC…` (from the sheet URL) | the GRC sheet |
-| `SHARED_DRIVE_FOLDER_ID` | `0AbC…` | parent folder for task folders (only with `File storage` = `Drive`) |
-| `GMAIL_TOKEN_SECRET` | `grc-gmail-refresh-token` | secret name: Gmail refresh token |
-| `OAUTH_CLIENT_SECRET` | `grc-gmail-oauth-client` | secret name: OAuth client JSON |
-| `GEMINI_KEY_SECRET` | `grc-gemini-api-key` | secret name: Gemini API key (AI Studio) |
-| `SCHEDULER_SA_EMAIL` | `grc-tracker-scheduler@<project>.iam.gserviceaccount.com` | who may call `/jobs/*` |
-| `SERVICE_URL` | `https://grc-tracker-xxxx.a.run.app` | expected Scheduler token audience |
-| `CHAT_PROJECT_NUMBER` | `123456789012` | expected Chat token audience |
-| `TZ` | `Asia/Hong_Kong` | |
+`app/settings.py` is the one place that lists every variable the service reads, and
+`.env.example` documents each of them (a test fails if one is missing). Locally they come from
+`.env`; on Cloud Run the non-secret ones come from `deploy/env.prod.yaml` and the secrets from
+Secret Manager (`deploy/secrets.txt`), set by Cloud Run as the same variables.
 
 If `SERVICE_URL`, `SCHEDULER_SA_EMAIL` or `CHAT_PROJECT_NUMBER` is empty, every protected call is
-rejected (fail closed).
+rejected (fail closed), and `/health` answers 503 with the names of the missing variables.
 
-**Gemini key locally:** put `GEMINI_API_KEY=...` in `.env` (git-ignored); it takes precedence over
-`GEMINI_KEY_SECRET`. Never commit it, paste it into chats or tickets, or pass it on a command line.
-To check the key, model and region with one live call (fake message), run from Cloud Shell or the
-Jakarta service, not from Hong Kong:
+**Gemini key locally:** put `GEMINI_API_KEY=...` in `.env` (git-ignored). Never commit it, paste
+it into chats or tickets, or pass it on a command line. To check the key, model and region with
+one live call (fake message), run from Cloud Shell or the Jakarta service, not from Hong Kong:
 
 ```bash
 python scripts/smoke_gemini.py
 ```
 
+## Deploy to Cloud Run
+
+Everything runs from Cloud Shell (or any machine with `gcloud`), in the repo folder, with the
+project selected (`gcloud config set project YOUR-PROJECT-ID`). Names (service `v2-git`, region
+`asia-southeast2`, accounts `grc-tracker-run` and `grc-tracker-scheduler`) live in
+`deploy/config.sh` only.
+
+1. **One-time Google Cloud setup** (APIs, the two service accounts and their roles, empty secrets,
+   Artifact Registry, the Cloud Tasks queue `wa-process`). Safe to run again:
+```bash
+deploy/setup_gcp.sh
+```
+2. **Secrets.** For each one in `deploy/secrets.txt` it asks for a file path or a hidden value
+   (type `s` to skip one, e.g. the WhatsApp ones before Meta is set up). Nothing is echoed or saved:
+```bash
+deploy/setup_secrets.sh
+```
+3. **Production settings.** Copy the example, fill in the values (none are secret), and store it
+   as the secret `grc-env-prod` that every deploy reads:
+```bash
+cp deploy/env.prod.yaml.example deploy/env.prod.yaml
+```
+```bash
+deploy/setup_secrets.sh env
+```
+4. **Deploy** (tests, build, deploy; prints the service URL, the WhatsApp webhook URL and the
+   health result):
+```bash
+deploy/deploy.sh
+```
+5. **Scheduler jobs** (creates or updates all six):
+```bash
+deploy/setup_scheduler.sh
+```
+6. **WhatsApp (when Meta is ready):** in the Meta app's webhook settings, paste the webhook URL
+   printed by `deploy.sh` and `WA_VERIFY_TOKEN` from `deploy/env.prod.yaml`, then subscribe to
+   **messages** (README §9b). Re-run steps 2 (WhatsApp secrets) and 4 if they were skipped.
+7. **Share the sheet** with `grc-tracker-run@YOUR-PROJECT-ID.iam.gserviceaccount.com` as Editor.
+8. **Apps Script:** install `apps_script/audit.gs` (§10 below).
+9. **Check:** `/health` must answer `{"status":"ok"}`. A 503 lists the missing variable names and
+   sheet problems (names only, never values):
+```bash
+curl -s https://v2-git-1085688466076.asia-southeast2.run.app/health
+```
+
+**Deploy on merge to `main`:** point the Cloud Build trigger at `cloudbuild.yaml` (Configuration:
+"Cloud Build configuration file"). It runs the tests, builds, and deploys with
+`deploy/deploy.sh --image …`, so it uses the same settings and secrets; no substitutions to fill.
+
+**Update one secret later** (e.g. a new Gmail token or WhatsApp token): add a version, then
+deploy again, because Cloud Run reads secrets when a revision starts:
+```bash
+deploy/setup_secrets.sh GMAIL_REFRESH_TOKEN
+```
+```bash
+deploy/deploy.sh --skip-tests
+```
+Changed `deploy/env.prod.yaml`? Run `deploy/setup_secrets.sh env`, then `deploy/deploy.sh`.
+
 ## Go-live checklist (walk through with IT)
 
-Names below are suggestions; keep them consistent with `cloudbuild.yaml` substitutions.
+Most Cloud steps below are done by the `deploy/` scripts (section "Deploy to Cloud Run");
+what remains here is what a person has to decide or click.
 
 ### 1. Sheet
 The service refuses to run until the sheet matches DESIGN section 3 and reports **every** gap in
@@ -133,28 +183,21 @@ one alert. Against `GRC_Tracker_Tabs_v2.xlsx` that means:
       second guard next to the Apps Script check.
 
 ### 2. Google Cloud project and APIs
-```bash
-gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com \
-  cloudscheduler.googleapis.com secretmanager.googleapis.com sheets.googleapis.com \
-  drive.googleapis.com gmail.googleapis.com chat.googleapis.com aiplatform.googleapis.com
-```
-The Artifact Registry repo `cloud-run-source-deploy` in `asia-southeast2` was created when Cloud
-Run was connected to the repo; `cloudbuild.yaml` pushes there (`_REPO`).
+- [ ] Done by `deploy/setup_gcp.sh` (APIs, Artifact Registry `cloud-run-source-deploy`, Cloud Tasks
+      queue `wa-process`). For `AI provider = Vertex` also enable `aiplatform.googleapis.com`.
 
 ### 3. Service accounts and roles (least privilege, DESIGN section 9)
-```bash
-gcloud iam service-accounts create grc-tracker-run --display-name="GRC tracker runtime"
-```
-```bash
-gcloud iam service-accounts create grc-tracker-scheduler --display-name="GRC tracker scheduler"
-```
-- [ ] `grc-tracker-run`: Secret Manager Secret Accessor **on the three secrets only** (Gmail
-      token, OAuth client, Gemini key); Vertex AI User (only if `AI provider = Vertex`); share the
-      GRC sheet with it as **Editor**; add it to the Shared Drive as **Content manager**.
-- [ ] `grc-tracker-scheduler`: no project roles needed (the app checks its token itself);
-      optionally `roles/run.invoker` on the service.
-- [ ] Cloud Build service account: Cloud Run Admin, Artifact Registry Writer, and Service Account
-      User on `grc-tracker-run`.
+`deploy/setup_gcp.sh` creates them and grants:
+- `grc-tracker-run`: Secret Accessor on the secrets in `deploy/secrets.txt` only; Cloud Tasks
+  Enqueuer; Service Account User on itself (WhatsApp tasks run as it).
+- `grc-tracker-scheduler`: `run.invoker` on the service (`deploy/setup_scheduler.sh`).
+- The build account (default: the Compute Engine default account; override with `BUILD_SA=`):
+  Cloud Run Admin, Artifact Registry Writer, Logs Writer, Storage Object Viewer, Service Account
+  User on `grc-tracker-run`, Secret Accessor on `grc-env-prod`.
+By hand:
+- [ ] Share the GRC sheet with `grc-tracker-run` as **Editor**; with `File storage` = Drive, add it
+      to the Shared Drive as **Content manager**.
+- [ ] Only with `AI provider = Vertex`: Vertex AI User for `grc-tracker-run`.
 
 ### 4. Org policy
 - [ ] Google Chat cannot send an IAM token, so the service is deployed with
@@ -174,10 +217,8 @@ gcloud iam service-accounts create grc-tracker-scheduler --display-name="GRC tra
 - [ ] OAuth consent screen: **Internal** (an external app in Testing expires refresh tokens after
       7 days). Create an OAuth client of type *Desktop app*; download its JSON.
 - [ ] Workspace admin: allow this OAuth client for `gmail.modify` and `gmail.send` (API controls).
-- [ ] Store the client JSON:
-```bash
-gcloud secrets create grc-gmail-oauth-client --data-file=oauth_client.json
-```
+- [ ] Store the client JSON: `deploy/setup_secrets.sh OAUTH_CLIENT_SECRET`, and give it the path
+      to the downloaded file.
 - [ ] **One-time consent as the bot:** on a trusted laptop, in a browser signed in as the bot
       account (not as a person), mint the refresh token (it is printed, never saved), store it,
       then clear the terminal:
@@ -185,8 +226,10 @@ gcloud secrets create grc-gmail-oauth-client --data-file=oauth_client.json
 pip install google-auth-oauthlib && python scripts/mint_gmail_token.py oauth_client.json
 ```
 ```bash
-printf '%s' '<refresh-token>' | gcloud secrets create grc-gmail-refresh-token --data-file=-
+deploy/setup_secrets.sh GMAIL_REFRESH_TOKEN
 ```
+(It checks nothing about the value: paste only the line starting with `1//`. The mint script
+prints which mailbox the token belongs to; it must be the bot.)
 - [ ] Fill Config `Allowed senders`. No labels need to be created: `GRC/Logged`, `GRC/Ignored`,
       `GRC/Reply` and `GRC/Failed` are created by the service.
 - [ ] Tell the team: forward or send requests to the bot address; the sender gets a reply in the
@@ -197,9 +240,9 @@ printf '%s' '<refresh-token>' | gcloud secrets create grc-gmail-refresh-token --
 - [ ] **Before go-live, Compliance/IT confirm** (D18): using the AI Studio Gemini API from a
       Jakarta server for Hong Kong staff, and (§14) a key from BRI Indonesia's project. If not
       approved, use `AI provider = Vertex` or `Off`.
-- [ ] Store the key in Secret Manager without it touching a file or shell history:
+- [ ] Store the key (hidden prompt; it never touches a file or the shell history):
 ```bash
-read -rsp 'Gemini key: ' k && printf '%s' "$k" | gcloud secrets create grc-gemini-api-key --data-file=- ; unset k
+deploy/setup_secrets.sh GEMINI_API_KEY
 ```
 - [ ] Check it once from Cloud Shell, then set Config `AI provider` =
       `Gemini API key`:
@@ -207,41 +250,24 @@ read -rsp 'Gemini key: ' k && printf '%s' "$k" | gcloud secrets create grc-gemin
 python scripts/smoke_gemini.py --secret grc-gemini-api-key --project "$(gcloud config get-value project)"
 ```
 
-### 7. Deploy (Cloud Build trigger on `main`)
-The service is `v2-git` in `asia-southeast2` at
-`https://v2-git-1085688466076.asia-southeast2.run.app`; `cloudbuild.yaml` already carries these.
-- [ ] Cloud Build → Triggers → the trigger Cloud Run created for the repo → Edit:
-      **Configuration: "Cloud Build configuration file"**, location `cloudbuild.yaml` (not
-      "Dockerfile": that skips the tests and every setting below).
-- [ ] On the trigger, add the substitution variable **`_SHEET_ID`** (and `_SHARED_DRIVE_FOLDER_ID`
-      only with `File storage` = `Drive`). A build without `_SHEET_ID` stops before deploying.
-- [ ] The trigger's service account needs Cloud Run Admin, Artifact Registry Writer, Logs Writer
-      and Service Account User on `grc-tracker-run`.
-- [ ] Push to `main` (or "Run" the trigger). The build runs ruff and the tests, builds, pushes
-      and deploys with `max-instances=1`, `min-instances=0`, **CPU always allocated**, the
-      `grc-tracker-run` service account, unauthenticated ingress (tokens are checked in the app)
-      and all environment variables. Settings changed by hand in the console are replaced by the
-      next deploy, so change them in `cloudbuild.yaml`.
-- [ ] Check: Cloud Build → History shows the build green, then:
+### 7. Deploy
+- [ ] `deploy/deploy.sh` (section "Deploy to Cloud Run"), or the Cloud Build trigger on `main`
+      with configuration file `cloudbuild.yaml`. Both deploy `v2-git` in `asia-southeast2` with
+      `max-instances=1`, `min-instances=0`, CPU always allocated, the `grc-tracker-run` account,
+      public ingress (every caller's token or signature is checked in the app), the settings from
+      `grc-env-prod` and the secrets from `deploy/secrets.txt`. Settings changed by hand in the
+      console are replaced by the next deploy: change `deploy/env.prod.yaml` instead.
+- [ ] Check:
 ```bash
 curl https://v2-git-1085688466076.asia-southeast2.run.app/health
 ```
 
 ### 8. Cloud Scheduler (all times Asia/Hong_Kong)
-Every job posts to the service with an OIDC token whose **audience is the service URL itself**
-(not the job path). Run as is; `URL` and `PROJECT` are filled in for you:
-```bash
-URL=https://v2-git-1085688466076.asia-southeast2.run.app
-PROJECT=$(gcloud config get-value project)
-for job in "gmail|*/10 * * * *" "changes|*/5 8-19 * * *" "recurring|0 7 * * *" "digest|0 9 * * 1-5"; do
-  name="${job%%|*}"; cron="${job#*|}"
-  gcloud scheduler jobs create http "grc-$name" --location=asia-southeast2 --schedule="$cron" \
-    --time-zone="Asia/Hong_Kong" --http-method=POST --uri="$URL/jobs/$name" \
-    --oidc-service-account-email="grc-tracker-scheduler@$PROJECT.iam.gserviceaccount.com" \
-    --oidc-token-audience="$URL" --attempt-deadline=300s
-done
-```
-(`*/5 8-19` runs 08:00–19:55; DESIGN says 08:00–20:00.)
+- [ ] `deploy/setup_scheduler.sh` creates or updates: `grc-gmail` (every 10 min), `grc-changes`
+      (every 5 min, 08:00–19:55), `grc-recurring` (daily 07:00), `grc-digest` (weekdays 09:00),
+      `grc-wa-reminders` (weekdays every 30 min, 07:00–19:30; the app sends once after Config
+      `Reminder time`) and `grc-wa-drafts` (every 10 min). Each sends an OIDC token of
+      `grc-tracker-scheduler` whose audience is `SERVICE_URL`.
 
 ### 9. Google Chat app
 In the Cloud console → Google Chat API → Configuration:
@@ -252,6 +278,37 @@ In the Cloud console → Google Chat API → Configuration:
 - [ ] Visibility: only the GRC team (people or a group in the domain).
 - [ ] Use the classic Chat app (HTTP) setup, not a Workspace add-on; the bot expects that event
       format.
+
+### 9b. WhatsApp bot (optional, DESIGN section 17)
+BRI does this part in Meta; the service only needs the IDs and two secrets afterwards.
+- [ ] Meta Business Manager (BRI's business, verified) → create an app of type *Business* → add the
+      **WhatsApp** product. Register a **dedicated phone number** for the bot (not one used in the
+      normal WhatsApp app).
+- [ ] Note the **Phone number ID** (`WA_PHONE_NUMBER_ID`), the **WhatsApp Business Account ID**
+      (`WA_WABA_ID`) and the Graph API version the app uses (`WA_GRAPH_VERSION`, e.g. `v23.0`).
+- [ ] Business settings → System users → create one, give it the app and the WhatsApp account,
+      and generate a **permanent token** with `whatsapp_business_messaging` and
+      `whatsapp_business_management` → `deploy/setup_secrets.sh WA_ACCESS_TOKEN`.
+- [ ] App settings → Basic → **App secret** → `deploy/setup_secrets.sh WA_APP_SECRET`.
+- [ ] Pick a long random **verify token** (`WA_VERIFY_TOKEN`; not a secret, but not guessable).
+- [ ] WhatsApp → Configuration → Webhook: callback URL
+      `https://v2-git-1085688466076.asia-southeast2.run.app/wa/webhook`, the verify token above,
+      then subscribe to the **messages** field.
+- [ ] WhatsApp → Message templates → create `grc_daily_reminder`, category *Utility*, language
+      *English*, body:
+      `Hi {{1}}, your GRC tasks today: {{2}} overdue, {{3}} due within 7 days, {{4}} in progress
+      but not updated recently. Open the tracker: {{5}}` — and wait for Meta's approval.
+- [ ] Sheet: add a `WhatsApp` column to **Staff** (international format, e.g. `+852 9123 4567`)
+      for everyone who may use the bot, and a hidden tab **`_wa_pending`** with the headers
+      `Key`, `Kind`, `Sender`, `Text`, `Prompt`, `Media`, `Message IDs`, `Task ID`, `Status`,
+      `Created at`, `Updated at`.
+- [ ] Google Cloud: `deploy/setup_gcp.sh` already made the queue and roles. Store the two
+      secrets with `deploy/setup_secrets.sh WA_ACCESS_TOKEN` and `… WA_APP_SECRET`, fill the `WA_*`
+      values and `RUNTIME_SA_EMAIL` in `deploy/env.prod.yaml` (then `deploy/setup_secrets.sh env`),
+      and run `deploy/deploy.sh`. The Scheduler jobs `grc-wa-drafts` and `grc-wa-reminders` come
+      from `deploy/setup_scheduler.sh`.
+- [ ] Test: send `help` to the bot from a Staff number, then the WhatsApp tests in
+      `docs/LIVE_TEST.md`.
 
 ### 10. Apps Script audit trigger (DESIGN D8)
 - [ ] Open the sheet → Extensions → Apps Script → paste `apps_script/audit.gs` → save.
@@ -281,10 +338,11 @@ In the Cloud console → Google Chat API → Configuration:
 
 ## Switching the AI provider
 
-Set Config `AI provider`; no redeploy is needed (read at every job run). Only masked text and file
-names are sent, never file contents; requests are sent with `store=False`.
+Set Config `AI provider`; no redeploy is needed (read at every job run). Masked text, file names
+and PDFs (unmasked, Config `AI reads PDFs`, DESIGN section 16 item 11) are sent; requests are sent
+with `store=False`.
 - `Off` — rules only; everything works, titles are the message's first sentence.
-- `Gemini API key` — Google AI Studio key from Secret Manager (`GEMINI_KEY_SECRET`). Needs the
+- `Gemini API key` — Google AI Studio key (`GEMINI_API_KEY`, injected from Secret Manager). Needs the
   service in an available region (asia-southeast2) and Compliance sign-off (D18).
 - `Vertex` — Gemini on Vertex AI with the runtime service account: set `AI region` and give the
   service account Vertex AI User. Google's recommendation for unlisted regions (D18).

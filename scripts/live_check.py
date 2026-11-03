@@ -435,7 +435,11 @@ def gmail_once(client, store, limit: int) -> None:
         return
     config = store.config()
     ai = provider_from_config(
-        config.ai_provider, config.ai_model, config.ai_region, os.environ.get("GCP_PROJECT", "")
+        config.ai_provider,
+        config.ai_model,
+        config.ai_region,
+        os.environ.get("GCP_PROJECT", ""),
+        os.environ.get("GEMINI_API_KEY", ""),
     )
     try:
         run = process_inbox(client, Services(store=store, drive=drive, ai=ai), limit=limit)

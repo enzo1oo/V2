@@ -11,7 +11,7 @@ from typing import Any
 
 from app.drive import Folder, folder_url
 from app.extract.ai import NotConfigured
-from app.models import AIResult, Attachment, CatalogEntry
+from app.models import WA_PENDING_COLUMNS, AIResult, Attachment, CatalogEntry
 from app.sheets import SheetStore, column_letter
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -71,6 +71,7 @@ class FakeSheetsBackend:
         ]
         tabs["_state"] = [["ID", "Status", "Owner", "Doer", "Notified doer", "Notified at"]]
         tabs["_failures"] = [["Key", "Count", "Last error", "Last at"]]
+        tabs["_wa_pending"] = [list(WA_PENDING_COLUMNS)]
         return cls(tabs)
 
     # Helpers for tests ---------------------------------------------------------------------
@@ -371,3 +372,44 @@ __all__ = [
     "NotConfigured",
     "column_letter",
 ]
+
+
+class FakeWhatsApp:
+    """The WhatsApp Cloud API: records texts and templates; media bytes by ID."""
+
+    def __init__(self, media: dict[str, bytes] | None = None):
+        self.texts: list[tuple[str, str]] = []
+        self.templates: list[tuple[str, str, str, list[str]]] = []
+        self.media = media or {}
+        self.fail_send = False
+
+    def send_text(self, to: str, text: str) -> None:
+        if self.fail_send:
+            raise RuntimeError("send failed")
+        self.texts.append((to, text))
+
+    def send_template(self, to: str, name: str, language: str, params: list[str]) -> None:
+        if self.fail_send:
+            raise RuntimeError("send failed")
+        self.templates.append((to, name, language, params))
+
+    def download_media(self, media_id: str) -> bytes:
+        if media_id not in self.media:
+            raise KeyError(media_id)
+        return self.media[media_id]
+
+    def last_text(self, to: str) -> str:
+        return [text for number, text in self.texts if number == to][-1]
+
+
+class FakeQueue:
+    """Cloud Tasks: records what was queued (tests run the tasks themselves)."""
+
+    def __init__(self) -> None:
+        self.tasks: list[tuple[dict[str, Any], float]] = []
+        self.fail = False
+
+    def enqueue(self, payload: dict[str, Any], delay_seconds: float = 0) -> None:
+        if self.fail:
+            raise RuntimeError("queue down")
+        self.tasks.append((payload, delay_seconds))

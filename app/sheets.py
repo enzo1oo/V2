@@ -24,6 +24,7 @@ from app import clock
 from app.models import (
     REQUIRED_COLUMNS,
     REQUIRED_CONFIG_SETTINGS,
+    WA_PENDING_COLUMNS,
     AppConfig,
     AuditEntry,
     CatalogEntry,
@@ -32,6 +33,7 @@ from app.models import (
     StaffMember,
     StateRow,
     Task,
+    WaPending,
 )
 
 WRITE_LOCK = threading.RLock()
@@ -40,7 +42,10 @@ MASTER = "Master"
 LOADED_TABS = ("Master", "Staff", "Catalog", "LetterCodes", "Config", "_state", "_failures")
 
 DATE_COLUMNS = frozenset({"Start / received", "Due date", "Submitted date", "Internship end date"})
-DATETIME_COLUMNS = frozenset({"Last updated", "Notified at", "Timestamp", "Last at"})
+DATETIME_COLUMNS = frozenset(
+    {"Last updated", "Notified at", "Timestamp", "Last at", "Created at", "Updated at"}
+)
+WA_PENDING = "_wa_pending"
 _SERIAL_EPOCH = datetime(1899, 12, 30)
 _ID_PATTERN = re.compile(r"^G-(\d+)$")
 
@@ -526,6 +531,36 @@ class SheetStore:
         failures = self.failures()
         failures[row.key] = row
         self._rewrite("_failures", [item.model_dump(by_alias=True) for item in failures.values()])
+
+    # WhatsApp drafts and deadline questions (v1.3) ---------------------------------------------
+
+    def _fresh_wa_pending(self) -> TabData:
+        """`_wa_pending`, re-read: drafts change between messages that arrive seconds apart."""
+        if WA_PENDING not in set(self._backend.sheet_titles()):
+            raise SchemaError([f"missing tab {WA_PENDING}"])
+        [values] = self._backend.get([quote_tab(WA_PENDING)])
+        tab = TabData.from_values(WA_PENDING, values)
+        missing = [column for column in WA_PENDING_COLUMNS if column not in tab.header]
+        if missing:
+            raise SchemaError([f"{WA_PENDING} is missing column(s): {', '.join(missing)}"])
+        return tab
+
+    def wa_pending(self) -> list[WaPending]:
+        tab = self._fresh_wa_pending()
+        records = (r for _, r in tab.records() if str(r.get("Key", "")).strip())
+        return _parse(WaPending, tab, records)
+
+    def edit_wa_pending[Result](self, edit: Callable[[list[WaPending]], Result]) -> Result:
+        """Read `_wa_pending`, let `edit` change the list in place, write it back; all under the
+        write lock, so two messages from one sender never both open a draft."""
+        with self._lock:
+            tab = self._fresh_wa_pending()
+            records = (r for _, r in tab.records() if str(r.get("Key", "")).strip())
+            rows = _parse(WaPending, tab, records)
+            result = edit(rows)
+            self._tabs[WA_PENDING] = tab
+            self._rewrite(WA_PENDING, [row.model_dump(by_alias=True) for row in rows])
+            return result
 
     def _rewrite(self, tab_name: str, records: list[dict[str, Any]]) -> None:
         with self._lock:

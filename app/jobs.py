@@ -11,7 +11,16 @@ from pydantic import BaseModel
 
 from app import clock
 from app.gmail import GmailAuthError, GmailClient
-from app.models import OPEN_STATUSES, AuditEntry, CatalogEntry, RawRequest, StateRow, Task
+from app.models import (
+    OPEN_STATUSES,
+    AppConfig,
+    AuditEntry,
+    CatalogEntry,
+    RawRequest,
+    StaffMember,
+    StateRow,
+    Task,
+)
 from app.notify import (
     MissingEmail,
     assignment_email,
@@ -240,6 +249,24 @@ def _open(tasks: list[Task]) -> list[Task]:
     return [task for task in tasks if task.status in OPEN_STATUSES]
 
 
+def personal_buckets(
+    person: StaffMember, open_tasks: list[Task], now: datetime, config: AppConfig
+) -> tuple[list[Task], list[Task], list[Task]]:
+    """(overdue, due within 7 days, In Progress not updated for `Stale after (days)`) for one
+    person's open tasks: the personal digest, by email and (v1.3) on WhatsApp."""
+    today = now.date()
+    stale_before = now - timedelta(days=config.stale_after_days)
+    mine = [t for t in open_tasks if t.doer.strip().casefold() == person.name.casefold()]
+    overdue = [t for t in mine if t.due_date and t.due_date < today]
+    due_soon = [t for t in mine if t.due_date and today <= t.due_date <= today + timedelta(7)]
+    stale = [
+        t
+        for t in mine
+        if t.status == "In Progress" and t.last_updated and t.last_updated < stale_before
+    ]
+    return overdue, due_soon, stale
+
+
 def run_digest(
     store: SheetStore, gmail: GmailClient, sheet_url: str, now: datetime | None = None
 ) -> DigestRun:
@@ -250,7 +277,6 @@ def run_digest(
     staff = store.staff()
     open_tasks = _open(tasks)  # Proposed is not open, so it never appears in personal digests
     label = f"{today:%a %d %b %Y}"
-    stale_before = now - timedelta(days=config.stale_after_days)
     run = DigestRun()
 
     def send(email, kind: str) -> bool:
@@ -267,14 +293,7 @@ def run_digest(
     for person in staff:
         if not person.email.strip():
             continue
-        mine = [t for t in open_tasks if t.doer.strip().casefold() == person.name.casefold()]
-        overdue = [t for t in mine if t.due_date and t.due_date < today]
-        due_soon = [t for t in mine if t.due_date and today <= t.due_date <= today + timedelta(7)]
-        stale = [
-            t
-            for t in mine
-            if t.status == "In Progress" and t.last_updated and t.last_updated < stale_before
-        ]
+        overdue, due_soon, stale = personal_buckets(person, open_tasks, now, config)
         email = personal_digest(person, overdue, due_soon, stale, sheet_url, label)
         if email is not None and send(email, "personal"):
             run.personal_sent += 1
