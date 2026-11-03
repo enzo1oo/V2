@@ -1,8 +1,9 @@
 # GRC Request Intake and Task Assignment — Build Spec v1.2
 
-Status: final design for the build (v1.2: bot mailbox intake, AI Studio Gemini API key). Source of truth for Claude Code.
-Sections 15 and 16 record the decisions made while building; where they are more specific than
-the text above, they win. Lines changed for them are marked **(v1.1)** or **(v1.2)**.
+Status: final design for the build (v1.2: bot mailbox intake, AI Studio Gemini API key; v1.3:
+WhatsApp bot, section 17). Source of truth for Claude Code.
+Sections 15, 16 and 17 record the decisions made while building; where they are more specific than
+the text above, they win. Lines changed for them are marked **(v1.1)**, **(v1.2)** or **(v1.3)**.
 Business context: see `docs/PRD.docx` (PRD with the TRD as Appendix A).
 Owner: Enzo Taslim (builder). Hosting: BRI HK IT (Google Cloud).
 
@@ -65,7 +66,8 @@ Required columns (exact header text):
 
 - `ID`: `G-0001` upward. The next number is the highest existing `G-` number + 1, computed under the write lock.
 - `Status` values: `Proposed`, `Not Started`, `In Progress`, `On Hold`, `Done`, `Cancelled`.
-- `Source`: `Email`, `Google Chat`, `Recurring <CatalogID> <yyyy-mm>`, `Manual`.
+- `Source`: `Email`, `Google Chat`, **(v1.3)** `WhatsApp`, `Recurring <CatalogID> <yyyy-mm>`,
+  `Manual`.
 - `Source ID`: Gmail message ID, Chat message name, or the recurring key. Used to skip duplicates.
 - `Weight`: write the same formula the existing rows use (looks up Effort in Config; blank = Medium).
 - `Link`: proof of submission (filled by people). `Files`: the Drive folder URL (filled by the service).
@@ -74,6 +76,8 @@ Required columns (exact header text):
 ### Staff
 `Name`, `Email`, `Main division`, `Role` (Staff/Intern/Manager), `Internship end date`,
 `Capacity (1 = full time)`, `Weighted open load` (formula; read its computed value).
+**(v1.3)** Optional `WhatsApp`: the person's number in international format (`+852 …`); needed to
+use the WhatsApp bot and to get WhatsApp reminders.
 
 ### Catalog
 `Catalog ID`, `Report type`, `Division`, `Regulator / Institution`, `Recurrence`, `Default owner`,
@@ -104,7 +108,13 @@ Existing: `Effort: Small/Medium/Large`, `Support share`, `Overload threshold`, `
 
 ### _failures (hidden, service only) **(v1.1)**
 `Key`, `Count`, `Last error`, `Last at`. `Key` is a `Source ID` (failure counter, section 11) or
-`alert:<kind>` (alert throttle). Needed because the instance scales to zero.
+`alert:<kind>` (alert throttle). Needed because the instance scales to zero. **(v1.3)** Also
+`wa-reminders:<yyyy-mm-dd>`: the day's WhatsApp reminders went out.
+
+### _wa_pending (hidden, service only) **(v1.3)**
+`Key`, `Kind`, `Sender`, `Text`, `Prompt`, `Media`, `Message IDs`, `Task ID`, `Status`,
+`Created at`, `Updated at`. Only the WhatsApp bot reads it (section 17); without it, email and Chat
+work as before.
 
 ---
 
@@ -203,7 +213,8 @@ class AIProvider(Protocol):
 `requester_org: str | None`, `contacts: list[{name, email}]`, `catalog_id: str` (an ID from the list
 or `NONE`), `language: "id" | "en" | "mixed"`.
 
-- Prompt lives in `prompts/extract_v2.md`; the version string is logged with each call.
+- Prompt lives in `prompts/extract_v3.md` **(v1.3: adds the WhatsApp sender's instructions)**; the
+  version string is logged with each call.
 - Input: masked cleaned text (max 8,000 characters), Catalog IDs with report names, attachment file
   names. **(v1.2 item 11)** An email's PDF attachments are also sent, unmasked, when Config `AI
   reads PDFs` is on (the default). Other file types: names only.
@@ -232,6 +243,10 @@ or `NONE`), `language: "id" | "en" | "mixed"`.
 | `POST /jobs/recurring` | Scheduler | daily 07:00 | Create confirmed Catalog reports due within `Recurring lead (days)`, once per period (`Source ID` = `Recurring <ID> <yyyy-mm>`) |
 | `POST /jobs/digest` | Scheduler | weekdays 09:00 | Personal and manager digests |
 | `POST /chat` | Google Chat | on event | Section 8 |
+| `GET/POST /wa/webhook` **(v1.3)** | Meta | on event | Verification handshake; signed messages → Cloud Tasks queue `wa-process` (section 17) |
+| `POST /tasks/wa-process` **(v1.3)** | Cloud Tasks | on event | One WhatsApp message, or the logging of a draft 30 s later |
+| `POST /jobs/wa-drafts` **(v1.3)** | Scheduler | every 10 min | Log drafts whose Cloud Task never ran; prune old rows |
+| `POST /jobs/wa-reminders` **(v1.3)** | Scheduler | weekdays, every 30 min 07:00–19:30 | Daily WhatsApp reminder template, once, at the first run after Config `Reminder time` |
 | `GET /healthz` | anyone | — | 200 OK, no data |
 | `GET /health` **(v1.2)** | anyone | — | Same as `/healthz`; use this one on Cloud Run, which reserves some paths ending in "z" |
 
@@ -274,7 +289,10 @@ within `Leaving warning (days)` who are still default owners in the Catalog, cou
 ## 9. Security
 
 - Verify on every request: Scheduler OIDC token (audience = service URL, email = scheduler SA);
-  Chat bearer token (Google-signed for Chat, audience = project number). Reject everything else.
+  Chat bearer token (Google-signed for Chat, audience = project number). **(v1.3)** Cloud Tasks
+  OIDC token on `/tasks/*` (audience = service URL, email = runtime SA); Meta's
+  `X-Hub-Signature-256` (HMAC of the body with the app secret) on `/wa/webhook`. Reject
+  everything else.
 - Secrets only from Secret Manager (Gmail refresh token, OAuth client secret, Gemini API key).
   Nothing secret in code, the sheet, env files committed to git, or logs.
 - Least privilege: runtime SA (Sheets via sharing, Drive Shared Drive, Vertex, Secret accessor);
@@ -309,7 +327,7 @@ grc-tracker/
 │   ├── notify.py             # email templates
 │   ├── auth.py               # token verification
 │   ├── logs.py, alerts.py    # (v1.1) JSON logs, alert emails
-├── prompts/extract_v2.md
+├── prompts/extract_v3.md
 ├── apps_script/audit.gs
 ├── scripts/mint_gmail_token.py   # one-time OAuth consent for the bot mailbox
 ├── scripts/smoke_gemini.py       # (v1.2) one live Gemini call, run by hand
@@ -367,7 +385,7 @@ deadline is never proposed; Done-without-proof is the Apps Script's job (not the
 
 ## 13. Out of scope for v1
 
-WhatsApp bot, web dashboard, automatic assignment without approval, migrating 2026 history,
+Web dashboard, automatic assignment without approval, migrating 2026 history,
 reading attachment contents (except email PDFs, section 16 item 11), multi-mailbox intake, reading Pak Dicki's personal inbox.
 
 ## 14. Open items (build around them, do not block)
@@ -484,3 +502,59 @@ reading attachment contents (except email PDFs, section 16 item 11), multi-mailb
     - Calls with PDFs get a 60 s timeout (text only stays 20 s; one retry either way). A Gmail
       run starts no new message after 150 s, so it ends inside the 300 s Cloud Run and Scheduler
       limits; the rest stay unread for the next run.
+
+## 17. Decisions made for v1.3: WhatsApp bot (approved by the project owner, 3 Nov 2026)
+
+Replaces "WhatsApp bot" in section 13 (PRD Phase 2: "WhatsApp intake without pasting"). Uses the
+WhatsApp Cloud API with a number and app that BRI registers in Meta Business Manager.
+
+1. **Intake:** staff send or forward a request (text, PDF, document or photo) to the bot's number.
+   `POST /wa/webhook` checks Meta's signature, puts each message on the Cloud Tasks queue
+   `wa-process` and answers at once (Meta resends slow answers). Delivery and read receipts are
+   ignored. Other message types get "I can read text, PDFs, documents and photos".
+2. **Who may use it:** numbers in the Staff `WhatsApp` column. Anyone else gets one reply ("This
+   number isn't registered …") and nothing is stored. Phone numbers are never logged.
+3. **Commands:** `help`, `my tasks` (as the Chat bot).
+4. **One message starts a request, then 30 seconds to add to it.** The first message opens a draft
+   (`_wa_pending`) and queues its logging 30 s later; the bot answers "Got it. I'll log it in 30
+   seconds …". Within the window, more text, files and PROMPTs from the same sender join the
+   draft (a forward of several messages arrives as several messages; Cloud Tasks does not keep
+   their order, so a PROMPT that arrives first waits for the request). A draft older than 60 s
+   takes no new messages.
+5. **PROMPT:** a message starting `PROMPT:` (any case; also as a file's caption).
+   - "assign (this) to <name>" (also `kasih ke`, `tugaskan ke`, `give it to`) proposes that
+     person as Owner and Doer, matched against Staff by rules (`route.sender_assignment`): full
+     name, else a unique first name, else a unique start of a name. A person chose, not the AI;
+     Status stays `Proposed` for the manager's approval. The routing note keeps what the rules
+     would have proposed. An unknown or ambiguous name keeps the rules' owner and flags
+     `PROMPT: "<name>" not found in Staff`; an intern leaving before the deadline is flagged.
+   - The whole PROMPT goes to the AI as "Sender's instructions" (classification, title,
+     deadline) and to `Notes` as `Sender's PROMPT: …`. Rules read only the forwarded request.
+   - A PROMPT within 5 minutes after its request was logged applies to that task while it is
+     still `Proposed` (AuditLog `PROMPT applied`).
+6. **Logging:** the draft becomes one `process_request` (Source `WhatsApp`, Source ID = the first
+   message ID, which dedupes retries). PDFs are downloaded from Meta and read by the AI (item
+   11); other files are names only unless `File storage` = Drive. `Files` reads "In the WhatsApp
+   chat with the bot: …". The reply is the Chat bot's (ID, title, proposed owner, due, flags,
+   "Waiting for manager approval").
+7. **Deadline confirmation:** the reply asks "Deadline: <date>. Reply YES if correct, or send the
+   correct date". The row is written first and flagged `Deadline not confirmed by sender
+   (WhatsApp)`. YES (also ya, ok, betul, benar, correct) clears the flag; a short message that is
+   mostly a date (at most 3 other words) sets `Due date`; both write AuditLog. Only the sender's
+   newest question counts, for 24 hours (WhatsApp's reply window); a message during an open
+   draft belongs to the draft.
+8. **Never lose a request (D15):** a failed logging returns the draft to `open` and the Cloud Task
+   retries; `/jobs/wa-drafts` (every 10 min) logs open drafts older than 2 minutes and retries
+   ones stuck for 10 minutes, and prunes finished rows after 7 days. If the queue is down, the
+   webhook answers 500 so Meta resends.
+9. **Reminders:** weekdays at the first `/jobs/wa-reminders` run after Config `Reminder time`,
+   each Staff member with a `WhatsApp` number and something overdue, due within 7 days or stale
+   gets the template `grc_daily_reminder` (language `en`), parameters: name, overdue count,
+   due-soon count, stale count, sheet link. Templates are required outside the 24-hour window;
+   BRI submits the template in Meta. The email digest stays.
+10. **Settings:** `WA_PHONE_NUMBER_ID`, `WA_WABA_ID`, `WA_GRAPH_VERSION`, `WA_VERIFY_TOKEN`,
+    `WA_TASKS_QUEUE` (default `wa-process`), `RUNTIME_SA_EMAIL`; secrets `WA_ACCESS_TOKEN` and
+    `WA_APP_SECRET` as env vars filled by Cloud Run from Secret Manager. Without them the bot is
+    off and its endpoints answer 404 or "skipped".
+11. **Compliance:** WhatsApp messages pass through Meta, and PDF contents reach Gemini unmasked
+    (item 11 of section 16). Both belong to the D18 Compliance check.

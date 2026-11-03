@@ -36,3 +36,19 @@ resource.type="cloud_run_revision" AND resource.labels.service_name="v2-git" AND
 | `schema_problem` | The sheet is missing the tab or column named in `reason`. |
 
 **Clean up:** delete the test rows from Master (or set them to `Cancelled`) when done.
+
+## WhatsApp bot (DESIGN section 17)
+
+Send from a phone whose number is in the Staff `WhatsApp` column, to the bot's number.
+
+| # | Send this | Expected |
+|---|-----------|----------|
+| W1 | `help` | The help text, mentioning PROMPT. |
+| W2 | Forward a request with a deadline (e.g. test 1's text). | At once: "Got it. I'll log it in 30 seconds …". About 30 s later: "Logged as G-…", proposed owner, and "Deadline: … Reply YES if correct". The row is `Proposed`, Source `WhatsApp`, flagged `Deadline not confirmed by sender (WhatsApp)`. |
+| W3 | Reply `YES`. | "… confirmed"; the flag is gone; AuditLog `Deadline confirmed`. |
+| W4 | Forward another request, then within 30 s `PROMPT: Assign this to <a Staff first name>`. | The new row's Owner and Doer are that person; Routing note starts `Assigned by sender (WhatsApp PROMPT)`; Notes has the PROMPT. Status is still `Proposed`. |
+| W5 | Reply to the deadline question with a different date, e.g. `27/11/2026`. | "Updated G-…: due Fri 27 Nov 2026"; `Due date` changed; AuditLog `Deadline corrected`. |
+| W6 | Send a PDF letter with no text. | Logged 30 s later; title and deadline read from the PDF; `Files` reads `In the WhatsApp chat with the bot: <file>`. |
+| W7 | From a number not in Staff, send anything. | One reply: "This number isn't registered …"; no row. |
+| W8 | Weekday, after Config `Reminder time`, someone with a `WhatsApp` number has a task due this week. | Within 30 minutes they get the `grc_daily_reminder` template; only once that day. |
+

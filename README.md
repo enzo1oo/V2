@@ -253,6 +253,36 @@ In the Cloud console → Google Chat API → Configuration:
 - [ ] Use the classic Chat app (HTTP) setup, not a Workspace add-on; the bot expects that event
       format.
 
+### 9b. WhatsApp bot (optional, DESIGN section 17)
+BRI does this part in Meta; the service only needs the IDs and two secrets afterwards.
+- [ ] Meta Business Manager (BRI's business, verified) → create an app of type *Business* → add the
+      **WhatsApp** product. Register a **dedicated phone number** for the bot (not one used in the
+      normal WhatsApp app).
+- [ ] Note the **Phone number ID** (`WA_PHONE_NUMBER_ID`), the **WhatsApp Business Account ID**
+      (`WA_WABA_ID`) and the Graph API version the app uses (`WA_GRAPH_VERSION`, e.g. `v23.0`).
+- [ ] Business settings → System users → create one, give it the app and the WhatsApp account,
+      and generate a **permanent token** with `whatsapp_business_messaging` and
+      `whatsapp_business_management` → Secret Manager as `WA_ACCESS_TOKEN`.
+- [ ] App settings → Basic → **App secret** → Secret Manager as `WA_APP_SECRET`.
+- [ ] Pick a long random **verify token** (`WA_VERIFY_TOKEN`; not a secret, but not guessable).
+- [ ] WhatsApp → Configuration → Webhook: callback URL
+      `https://v2-git-1085688466076.asia-southeast2.run.app/wa/webhook`, the verify token above,
+      then subscribe to the **messages** field.
+- [ ] WhatsApp → Message templates → create `grc_daily_reminder`, category *Utility*, language
+      *English*, body:
+      `Hi {{1}}, your GRC tasks today: {{2}} overdue, {{3}} due within 7 days, {{4}} in progress
+      but not updated recently. Open the tracker: {{5}}` — and wait for Meta's approval.
+- [ ] Sheet: add a `WhatsApp` column to **Staff** (international format, e.g. `+852 9123 4567`)
+      for everyone who may use the bot, and a hidden tab **`_wa_pending`** with the headers
+      `Key`, `Kind`, `Sender`, `Text`, `Prompt`, `Media`, `Message IDs`, `Task ID`, `Status`,
+      `Created at`, `Updated at`.
+- [ ] Google Cloud: a Cloud Tasks queue `wa-process` in `asia-southeast2`; the runtime account
+      needs *Cloud Tasks Enqueuer* and *Service Account User* on itself (tasks run as it);
+      env vars `RUNTIME_SA_EMAIL`, `WA_*`; Scheduler jobs `wa-drafts` (every 10 min) and
+      `wa-reminders` (weekdays every 30 min, 07:00–19:30).
+- [ ] Test: send `help` to the bot from a Staff number, then the WhatsApp tests in
+      `docs/LIVE_TEST.md`.
+
 ### 10. Apps Script audit trigger (DESIGN D8)
 - [ ] Open the sheet → Extensions → Apps Script → paste `apps_script/audit.gs` → save.
 - [ ] Run `installAuditTrigger` once as a person who can edit the protected AuditLog; accept the
