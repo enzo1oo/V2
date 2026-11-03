@@ -25,6 +25,7 @@ from app.settings import Settings
 SETTINGS = Settings(
     service_url="https://grc.example.run.app",
     scheduler_sa_email="scheduler@proj.iam.gserviceaccount.com",
+    runtime_sa_email="run@proj.iam.gserviceaccount.com",
     chat_project_number="123456789",
 )
 
@@ -94,6 +95,15 @@ def verifier():
 
 def test_valid_scheduler_token(verifier):
     verifier.verify_scheduler(scheduler_token())
+
+
+def test_cloud_tasks_token_is_the_runtime_account_and_not_interchangeable(verifier):
+    task_token = scheduler_token(email=SETTINGS.runtime_sa_email)
+    verifier.verify_task(task_token)
+    with pytest.raises(Unauthorized):
+        verifier.verify_task(scheduler_token())  # the scheduler cannot call /tasks/*
+    with pytest.raises(Unauthorized):
+        verifier.verify_scheduler(task_token)  # and tasks cannot call /jobs/*
 
 
 @pytest.mark.parametrize(

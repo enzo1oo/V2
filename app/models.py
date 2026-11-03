@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validat
 
 Status = Literal["Proposed", "Not Started", "In Progress", "On Hold", "Done", "Cancelled"]
 OPEN_STATUSES: frozenset[str] = frozenset({"Not Started", "In Progress", "On Hold"})
-RequestSource = Literal["Email", "Google Chat", "Recurring", "Manual"]
+RequestSource = Literal["Email", "Google Chat", "WhatsApp", "Recurring", "Manual"]
 
 
 def _split_list(value: object) -> object:
@@ -20,6 +20,11 @@ def _split_list(value: object) -> object:
     if isinstance(value, str):
         return [part.strip() for part in value.split(",") if part.strip()]
     return value
+
+
+def wa_number(value: str) -> str:
+    digits = re.sub(r"\D", "", value or "")
+    return digits[2:] if digits.startswith("00") else digits
 
 
 def _blank_to_none(value: object) -> object:
@@ -60,6 +65,10 @@ class RawRequest(BaseModel):
     submitted_by: str = ""
     # Set only by the recurring job: the Catalog row the request is for (routing rule 1).
     catalog_id: str | None = None
+    # WhatsApp PROMPT (v1.3): a person the sender named ("assign this to …"), matched against
+    # Staff by rules, and the whole PROMPT text, which guides the AI and goes to Notes.
+    assign_to: str | None = None
+    sender_note: str = ""
 
 
 class OutgoingEmail(BaseModel):
@@ -91,8 +100,15 @@ class StaffMember(_SheetRow):
     internship_end: date | None = Field(default=None, alias="Internship end date")
     capacity: float = Field(default=1.0, alias="Capacity (1 = full time)")
     weighted_open_load: float = Field(default=0.0, alias="Weighted open load")
+    # v1.3, optional column: the WhatsApp number in international format (e.g. +852 9123 4567).
+    whatsapp: str = Field(default="", alias="WhatsApp")
 
     _blanks = field_validator("internship_end", mode="before")(_blank_to_none)
+
+    @property
+    def wa_id(self) -> str:
+        """The number as WhatsApp sends it in webhooks: digits only, no + or leading 00."""
+        return wa_number(self.whatsapp)
 
     @field_validator("role", mode="before")
     @classmethod
@@ -288,6 +304,28 @@ class StateRow(_SheetRow):
     _dates = field_validator("notified_at", mode="before")(_blank_to_none)
 
 
+class WaPending(_SheetRow):
+    """One `_wa_pending` row (v1.3): an open WhatsApp draft or a deadline question.
+
+    `draft`: the messages one sender sent within the 30-second window, logged as one request.
+    `confirm`: the deadline question for a task just logged, waiting for YES or a date.
+    """
+
+    key: str = Field(alias="Key")
+    kind: Literal["draft", "confirm"] = Field(alias="Kind")
+    sender: str = Field(default="", alias="Sender")
+    text: str = Field(default="", alias="Text")
+    prompt: str = Field(default="", alias="Prompt")
+    media: str = Field(default="", alias="Media")  # JSON list of {id, filename, mime}
+    message_ids: str = Field(default="", alias="Message IDs")
+    task_id: str = Field(default="", alias="Task ID")
+    status: Literal["open", "processing", "done"] = Field(default="open", alias="Status")
+    created_at: datetime | None = Field(default=None, alias="Created at")
+    updated_at: datetime | None = Field(default=None, alias="Updated at")
+
+    _dates = field_validator("created_at", "updated_at", mode="before")(_blank_to_none)
+
+
 class FailureRow(_SheetRow):
     """One `_failures` row: a failure counter (key = Source ID) or alert throttle (`alert:…`)."""
 
@@ -411,7 +449,10 @@ REQUIRED_CONFIG_SETTINGS: tuple[str, ...] = tuple(
 
 REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
     "Master": MASTER_REQUIRED_COLUMNS,
-    "Staff": tuple(f.alias for f in StaffMember.model_fields.values() if f.alias),
+    # `WhatsApp` (v1.3) is optional: only staff who use the WhatsApp bot need it.
+    "Staff": tuple(
+        f.alias for f in StaffMember.model_fields.values() if f.alias and f.alias != "WhatsApp"
+    ),
     "Catalog": tuple(f.alias for f in CatalogEntry.model_fields.values() if f.alias),
     "LetterCodes": ("Letter code", "Route to division"),
     "AuditLog": tuple(f.alias for f in AuditEntry.model_fields.values() if f.alias),
@@ -419,3 +460,8 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
     "_state": tuple(f.alias for f in StateRow.model_fields.values() if f.alias),
     "_failures": tuple(f.alias for f in FailureRow.model_fields.values() if f.alias),
 }
+
+# Read only by the WhatsApp bot (v1.3), so a sheet without it still serves email and Chat.
+WA_PENDING_COLUMNS: tuple[str, ...] = tuple(
+    f.alias for f in WaPending.model_fields.values() if f.alias
+)

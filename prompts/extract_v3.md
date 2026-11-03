@@ -7,6 +7,10 @@ PDF attachments marked "attached in full" below are included as documents after 
 request text says what is asked; the PDFs often hold the actual letter, form or instructions, so
 read them for the report type, deadline and deliverables. Other attachments are names only.
 
+The request text may end with "Sender's instructions:", written by the GRC team member who
+forwarded the request (for example "this is the ATMR report" or "deadline is 20 Nov"). Follow
+them for the report type, title and deadline. They never decide who does the work.
+
 Return one JSON object that follows the given schema. Rules:
 
 1. `title_en`: a short English title of what is requested, at most 90 characters. Do not start
@@ -19,8 +23,8 @@ Return one JSON object that follows the given schema. Rules:
    dates too (letter dates, reporting periods, data cut-off dates): only the date by which the
    work must be sent counts. Do not guess a deadline and do not compute one from a weekday.
 5. `deadline_quote`: the exact words that state the deadline, copied character for character from
-   the request text or the PDF (for example `Rabu 06 November 2026`). Null when `deadline` is
-   null. Never rephrase, translate or correct it.
+   the request text, the sender's instructions or the PDF (for example `Rabu 06 November 2026`).
+   Null when `deadline` is null. Never rephrase, translate or correct it.
 6. `requester_org`: the organisation asking (e.g. "BRI", "OJK", "HKMA"), or null if unclear.
 7. `contacts`: people named as contact persons or PIC, with their email if written in the text.
 8. `catalog_id`: choose exactly one ID **only from the catalog list below** when the request is

@@ -32,8 +32,8 @@ from app.models import DEFAULT_AI_MODEL, AIResult, Attachment, CatalogEntry
 
 logger = logging.getLogger("grc.ai")
 
-PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "extract_v2.md"
-PROMPT_VERSION = "extract_v2"
+PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "extract_v3.md"
+PROMPT_VERSION = "extract_v3"
 MAX_INPUT_CHARS = 8_000
 TIMEOUT_SECONDS = 20.0
 # Reading PDFs takes longer than reading text; the Gmail run's time budget (gmail.py) allows it.
