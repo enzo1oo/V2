@@ -5,3 +5,11 @@ __pycache__/
 .env
 *.pyc
 .coverage
+
+# Secrets and local production settings (never commit; see deploy/secrets.txt)
+deploy/env.prod.yaml
+secrets/
+client_secret*.json
+*credentials*.json
+*service-account*.json
+*-key.json

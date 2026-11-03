@@ -569,6 +569,7 @@ WA_SETTINGS = Settings(
     wa_verify_token="verify-me",
     wa_access_token="token",
     wa_app_secret="app-secret",
+    runtime_sa_email="run@proj.iam.gserviceaccount.com",
 )
 
 

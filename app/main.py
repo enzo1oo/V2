@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Annotated
@@ -29,7 +30,7 @@ from app.gmail import GmailAuthError, GmailClient, GoogleGmailClient, process_in
 from app.jobs import run_changes, run_digest, run_recurring
 from app.logs import setup_logging
 from app.pipeline import Services
-from app.settings import Settings, get_settings
+from app.settings import Settings, get_settings, missing_settings
 from app.sheets import GoogleSheetsBackend, SchemaError, SheetStore
 from app.whatsapp import (
     CloudTasksQueue,
@@ -48,9 +49,74 @@ from app.whatsapp import (
 logger = logging.getLogger("grc.main")
 
 
+@dataclass
+class Health:
+    """The startup check: missing variable names and sheet problems (names only, no values)."""
+
+    missing: list[str]
+    sheet: list[str]
+    checked_at: float
+
+    @property
+    def ok(self) -> bool:
+        return not self.missing and not self.sheet
+
+
+RECHECK_SECONDS = 60.0
+_health: Health | None = None
+
+
+def _sheet_store(settings: Settings) -> SheetStore:
+    return SheetStore(GoogleSheetsBackend(settings.sheet_id))
+
+
+def check_startup(
+    settings: Settings, store_factory: Callable[[Settings], SheetStore] = _sheet_store
+) -> Health:
+    """Every required variable set, and the sheet has every required tab, column and setting.
+    Never raises: a broken setup must still boot so /health can say what is wrong."""
+    missing = missing_settings(settings)
+    sheet: list[str] = []
+    if "SHEET_ID" not in missing:
+        try:
+            store = store_factory(settings)
+            store.load()
+            config = store.config()
+            if config.ai_provider == "Gemini API key" and not (
+                settings.gemini_api_key.get_secret_value()
+            ):
+                missing.append("GEMINI_API_KEY")
+            if config.file_storage == "Drive" and not settings.shared_drive_folder_id:
+                missing.append("SHARED_DRIVE_FOLDER_ID")
+            if settings.wa_enabled:
+                store.wa_pending()
+        except SchemaError as error:
+            sheet = list(error.problems)
+        except Exception as error:  # unreachable, not shared with the runtime account, ...
+            sheet = [f"sheet not readable: {type(error).__name__}"]
+    for name in missing:
+        logger.error("startup_missing_setting", extra={"reason": name})
+    for problem in sheet:
+        logger.error("startup_sheet_problem", extra={"reason": problem})
+    return Health(missing, sheet, time.monotonic())
+
+
+def current_health() -> Health | None:
+    """The startup result; sheet problems are re-checked at most once a minute, so fixing the
+    sheet needs no redeploy (missing variables do: they only change with a new revision)."""
+    global _health
+    health = _health
+    stale = health is not None and time.monotonic() - health.checked_at > RECHECK_SECONDS
+    if stale and health is not None and health.sheet and not health.missing:
+        _health = health = check_startup(get_settings())
+    return health
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    global _health
     setup_logging()
+    _health = await run_in_threadpool(check_startup, get_settings())
     yield
 
 
@@ -76,7 +142,7 @@ class Runtime:
             config.ai_model,
             config.ai_region,
             self.settings.gcp_project,
-            self.settings.gemini_key_secret,
+            self.settings.gemini_api_key.get_secret_value(),
         )
         return Services(store=self.store, drive=self.drive, ai=ai)
 
@@ -129,9 +195,7 @@ def get_runtime() -> Runtime:
     global _gmail_client
     settings = get_settings()
     if _gmail_client is None:
-        _gmail_client = GoogleGmailClient.from_secrets(
-            settings.gmail_token_secret, settings.oauth_client_secret
-        )
+        _gmail_client = GoogleGmailClient.from_settings(settings)
     links = get_wa_links()
     return Runtime(
         settings=settings,
@@ -175,10 +239,14 @@ def _job_error(job: str, error: Exception, runtime: Runtime) -> JSONResponse:
 jobs = APIRouter(prefix="/jobs", dependencies=[Depends(require_scheduler)])
 
 
-@app.get("/health")
-@app.get("/healthz")
-def healthz() -> dict[str, str]:
-    return {"status": "ok"}
+@app.get("/health", response_model=None)
+@app.get("/healthz", response_model=None)
+def healthz() -> dict[str, str] | JSONResponse:
+    health = current_health()
+    if health is None or health.ok:
+        return {"status": "ok"}
+    content = {"status": "unhealthy", "missing": health.missing, "sheet": health.sheet}
+    return JSONResponse(content, status_code=503)
 
 
 @jobs.post("/gmail", response_model=None)

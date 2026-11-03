@@ -35,3 +35,15 @@ def log_everything():
     logger.setLevel(logging.DEBUG)
     yield
     logger.setLevel(previous)
+
+
+@pytest.fixture(autouse=True)
+def clean_environment(monkeypatch):
+    """Settings read the environment: a developer's exported variables must not leak into tests."""
+    from app.settings import Settings, get_settings
+
+    for name in Settings.model_fields:
+        monkeypatch.delenv(name.upper(), raising=False)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()

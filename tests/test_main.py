@@ -112,3 +112,73 @@ def test_chat_endpoint_when_sheet_is_broken(fixture_text):
     response = client_with(runtime(backend=backend)).post("/chat", json=event)
     assert response.status_code == 200
     assert "not available" in response.json()["text"]
+
+
+# --- startup check and /health ----------------------------------------------------------------
+
+FULL = {
+    "gcp_project": "proj", "gcp_region": "asia-southeast2", "sheet_id": "sheet-1",
+    "service_url": "https://svc", "scheduler_sa_email": "s@proj", "chat_project_number": "1",
+    "gmail_refresh_token": "1//token", "oauth_client_secret": '{"installed": {}}',
+    "gemini_api_key": "key", "shared_drive_folder_id": "folder-1",
+}  # fmt: skip
+
+
+def test_startup_check_names_missing_variables_and_never_their_values(caplog):
+    from app import main as main_module
+
+    settings = Settings(**{**FULL, "sheet_id": "", "gmail_refresh_token": ""})
+    with caplog.at_level(logging.ERROR, logger="grc"):
+        health = main_module.check_startup(settings, store_factory=lambda s: 1 / 0)
+    assert health.missing == ["SHEET_ID", "GMAIL_REFRESH_TOKEN"] and health.sheet == []
+    reasons = [r.reason for r in caplog.records if r.getMessage() == "startup_missing_setting"]
+    assert reasons == ["SHEET_ID", "GMAIL_REFRESH_TOKEN"]
+
+
+def test_startup_check_whatsapp_is_all_or_nothing():
+    from app import main as main_module
+
+    store = lambda s: FakeSheetStore(FakeSheetsBackend.from_fixtures())  # noqa: E731
+    assert main_module.check_startup(Settings(**FULL), store).ok
+    partly = Settings(**FULL, wa_phone_number_id="PNID")
+    assert "WA_ACCESS_TOKEN" in main_module.check_startup(partly, store).missing
+
+
+def test_startup_check_reports_sheet_problems_and_config_needs():
+    from app import main as main_module
+
+    backend = FakeSheetsBackend.from_fixtures()
+    del backend.tabs["_failures"]
+    health = main_module.check_startup(Settings(**FULL), lambda s: FakeSheetStore(backend))
+    assert health.sheet == ["missing tab _failures"]
+    # The fixture sheet uses File storage = Drive; with the Gemini key provider both are needed.
+    gemini = FakeSheetsBackend.from_fixtures()
+    for row in gemini.tabs["Config"]:
+        if row[0] == "AI provider":
+            row[1] = "Gemini API key"
+    bare = Settings(**{**FULL, "gemini_api_key": "", "shared_drive_folder_id": ""})
+    missing = main_module.check_startup(bare, lambda s: FakeSheetStore(gemini)).missing
+    assert missing == ["GEMINI_API_KEY", "SHARED_DRIVE_FOLDER_ID"]
+    unreachable = main_module.check_startup(Settings(**FULL), lambda s: 1 / 0)
+    assert unreachable.sheet == ["sheet not readable: ZeroDivisionError"]
+
+
+def test_health_is_503_with_the_missing_names(monkeypatch):
+    from app import main as main_module
+
+    broken = main_module.Health(missing=["SHEET_ID"], sheet=[], checked_at=0.0)
+    monkeypatch.setattr(main_module, "_health", broken)
+    for path in ("/health", "/healthz"):
+        response = TestClient(app).get(path)
+        assert response.status_code == 503
+        assert response.json() == {"status": "unhealthy", "missing": ["SHEET_ID"], "sheet": []}
+
+
+def test_sheet_problems_are_rechecked_without_a_redeploy(monkeypatch):
+    from app import main as main_module
+
+    stale = main_module.Health(missing=[], sheet=["missing tab _failures"], checked_at=-1e9)
+    monkeypatch.setattr(main_module, "_health", stale)
+    fixed = main_module.Health(missing=[], sheet=[], checked_at=0.0)
+    monkeypatch.setattr(main_module, "check_startup", lambda settings: fixed)
+    assert TestClient(app).get("/health").status_code == 200
