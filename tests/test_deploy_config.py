@@ -123,3 +123,50 @@ def test_secret_values_are_never_command_line_arguments():
     script = (ROOT / "deploy" / "setup_secrets.sh").read_text(encoding="utf-8")
     assert "read -r -s" in script and "--data-file=-" in script
     assert 'echo "$value"' not in script and "set -x" not in script
+
+
+def _run_make_env(tmp_path: Path, answer: str) -> subprocess.CompletedProcess[str]:
+    """deploy/make_env.sh in a copy of deploy/, with a fake gcloud (no network, no real project)."""
+    deploy = tmp_path / "deploy"
+    shutil.copytree(ROOT / "deploy", deploy, ignore=shutil.ignore_patterns("env.prod.yaml"))
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "gcloud"
+    fake.write_text(
+        '#!/usr/bin/env bash\ncase "$*" in\n'
+        '  "config get-value project") echo proj-x ;;\n'
+        '  "projects describe"*) echo 123456789 ;;\nesac\n',
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)}
+    return subprocess.run(
+        ["bash", str(deploy / "make_env.sh")],
+        input=answer, capture_output=True, text=True, env=env, check=False,
+    )  # fmt: skip
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_make_env_fills_everything_but_the_sheet_from_the_project(tmp_path):
+    link = "https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz_-0123/edit#gid=0\n"
+    result = _run_make_env(tmp_path, link)
+    assert result.returncode == 0, result.stderr
+    text = (tmp_path / "deploy" / "env.prod.yaml").read_text(encoding="utf-8")
+    assert re.findall(r"^([A-Z][A-Z0-9_]*):", text, flags=re.MULTILINE) == prod_example_keys()
+    for line in (
+        'GCP_PROJECT: "proj-x"',
+        'SHEET_ID: "1AbCdEfGhIjKlMnOpQrStUvWxYz_-0123"',
+        'SERVICE_URL: "https://v2-git-123456789.asia-southeast2.run.app"',
+        'SCHEDULER_SA_EMAIL: "grc-tracker-scheduler@proj-x.iam.gserviceaccount.com"',
+        'RUNTIME_SA_EMAIL: "grc-tracker-run@proj-x.iam.gserviceaccount.com"',
+        'CHAT_PROJECT_NUMBER: "123456789"',
+        'WA_PHONE_NUMBER_ID: ""',
+    ):
+        assert line in text
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_make_env_refuses_something_that_is_not_a_sheet_id(tmp_path):
+    result = _run_make_env(tmp_path, "<SHEET_ID>\n")
+    assert result.returncode == 1
+    assert not (tmp_path / "deploy" / "env.prod.yaml").exists()
