@@ -95,7 +95,8 @@ def pdf(message_id: str, caption: str = "", sender: str = A) -> WAMessage:
 
 
 def pending(ctx: WaContext):
-    return ctx.store.wa_pending()
+    """Drafts and deadline questions (not the "sent" rows that remember bot messages)."""
+    return [row for row in ctx.store.wa_pending() if row.kind != "sent"]
 
 
 def task(ctx: WaContext, task_id: str):
@@ -270,7 +271,7 @@ def test_forward_then_prompt_then_log_with_the_senders_choice():
     assert row.routing_note.startswith("Assigned by sender (WhatsApp PROMPT) to Staff P")
     assert "Sender's PROMPT: Assign this to Staff P" in row.notes
     assert row.due_date == date(2026, 11, 20) and DEADLINE_FLAG in row.flags
-    assert row.files == "In the WhatsApp chat with the bot: Surat.pdf"
+    assert row.files == "In the GRC bot mailbox: Surat.pdf"
     # the AI got the PROMPT as instructions and the PDF as a document
     [call] = ai.calls
     assert "Sender's instructions: Assign this to Staff P" in call["text"]
@@ -441,7 +442,7 @@ def test_drafts_job_logs_a_draft_whose_task_never_ran_and_prunes_old_rows():
     run = run_wa_drafts(ctx, now=now() + timedelta(minutes=5))
     assert run.finalized == 1 and logged(ctx)
     run = run_wa_drafts(ctx, now=now() + timedelta(days=wa_module.KEEP_DAYS + 2))
-    assert run.pruned == 2 and pending(ctx) == []  # the done draft and the expired question
+    assert run.pruned >= 2 and ctx.store.wa_pending() == []  # draft, question, sent rows
 
 
 def test_drafts_job_leaves_a_fresh_draft_alone():

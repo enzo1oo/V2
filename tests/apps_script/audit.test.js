@@ -57,12 +57,30 @@ function setup(masterRows, opts = {}) {
   const audit = makeSheet('AuditLog', [['Timestamp', 'User', 'Task ID', 'Action', 'Field', 'Old value', 'New value', 'Reason']]);
   const toasts = [];
   const triggers = [];
+  const staff = opts.staff ? makeSheet('Staff', opts.staff) : null;
+  const validations = [];
+  master.getMaxRows = () => 1000;
+  const realGetRange = master.getRange;
+  master.getRange = (row, col, numRows = 1, numCols = 1) => {
+    const range = realGetRange(row, col, numRows, numCols);
+    range.setDataValidation = (rule) => validations.push({ col, row, numRows, rule });
+    return range;
+  };
   const spreadsheet = {
-    getSheetByName: (n) => ({ Master: master, AuditLog: audit }[n] || null),
+    getSheetByName: (n) => ({ Master: master, AuditLog: audit, Staff: staff }[n] || null),
     toast: (msg) => toasts.push(msg),
   };
+  const builder = () => {
+    const rule = {};
+    const b = {
+      requireValueInList: (list) => { rule.list = list; return b; },
+      setAllowInvalid: (allow) => { rule.allowInvalid = allow; return b; },
+      build: () => rule,
+    };
+    return b;
+  };
   const context = {
-    SpreadsheetApp: { getActive: () => spreadsheet },
+    SpreadsheetApp: { getActive: () => spreadsheet, newDataValidation: builder },
     Session: { getActiveUser: () => ({ getEmail: () => opts.sessionEmail || '' }) },
     ScriptApp: {
       getProjectTriggers: () => triggers,
@@ -75,7 +93,7 @@ function setup(masterRows, opts = {}) {
   };
   vm.createContext(context);
   vm.runInContext(SOURCE, context);
-  return { master, audit, toasts, triggers, api: context.module.exports };
+  return { master, audit, toasts, triggers, validations, api: context.module.exports };
 }
 
 // Simulate a user typing: write the new values first, as Sheets does, then fire the trigger.
@@ -198,4 +216,68 @@ test('installAuditTrigger replaces an existing trigger instead of adding a secon
   env.api.installAuditTrigger();
   assert.strictEqual(env.triggers.length, 1);
   assert.strictEqual(env.triggers[0].getHandlerFunction(), 'onMasterEdit');
+});
+
+
+// --- v1.4: review statuses (DESIGN section 19) ---------------------------------------------------
+
+const REVIEW_HEADER = ['ID', 'Status', 'Submitted date', 'Link', 'Last updated', 'Doer', 'Reviewer',
+  'Needs review'];
+const STAFF = [
+  ['Name', 'Email', 'Role', 'Reports to'],
+  ['Boss One', 'boss@example.com', 'Manager', ''],
+  ['Lead Two', 'lead@example.com', 'Full time', 'Boss One'],
+  ['Intern Three', 'intern@example.com', 'Intern', 'Lead Two'],
+  ['Other Four', 'other@example.com', 'Full time', 'Boss One'],
+];
+
+function reviewSetup(row) {
+  const env = setup([], { staff: STAFF });
+  env.master.data[0] = REVIEW_HEADER.slice();
+  env.master.data.push(row);
+  return env;
+}
+const rcol = (name) => REVIEW_HEADER.indexOf(name) + 1;
+
+test('Approved by someone who is not the reviewer is undone', () => {
+  const env = reviewSetup(['G-0101', 'In Review', '', '', '', 'Intern Three', '', 'Yes']);
+  edit(env, 2, rcol('Status'), 'Approved', 'In Review', 'other@example.com');
+  assert.strictEqual(env.master.data[1][rcol('Status') - 1], 'In Review');
+  assert.strictEqual(auditRows(env)[1][7], 'Only the reviewer or a Manager can approve or return');
+});
+
+test("the intern's full-time supervisor is the default reviewer", () => {
+  const env = reviewSetup(['G-0102', 'In Review', '', '', '', 'Intern Three', '', 'Yes']);
+  edit(env, 2, rcol('Status'), 'Returned', 'In Review', 'lead@example.com');
+  assert.strictEqual(env.master.data[1][rcol('Status') - 1], 'Returned');
+});
+
+test('a Manager can always approve; a named Reviewer replaces the default', () => {
+  const env = reviewSetup(['G-0103', 'In Review', '', '', '', 'Intern Three', 'Other Four', 'Yes']);
+  edit(env, 2, rcol('Status'), 'Approved', 'In Review', 'lead@example.com');
+  assert.strictEqual(env.master.data[1][rcol('Status') - 1], 'In Review'); // not the reviewer now
+  edit(env, 2, rcol('Status'), 'Approved', 'In Review', 'other@example.com');
+  assert.strictEqual(env.master.data[1][rcol('Status') - 1], 'Approved');
+  const env2 = reviewSetup(['G-0104', 'In Review', '', '', '', 'Lead Two', '', 'Yes']);
+  edit(env2, 2, rcol('Status'), 'Approved', 'In Review', 'boss@example.com');
+  assert.strictEqual(env2.master.data[1][rcol('Status') - 1], 'Approved');
+});
+
+test('Done on a task that needs review is undone unless it was Approved', () => {
+  const proof = new Date(2026, 10, 5);
+  const env = reviewSetup(['G-0105', 'In Progress', proof, 'In the GRC bot mailbox: p.pdf', '',
+    'Lead Two', '', 'Yes']);
+  edit(env, 2, rcol('Status'), 'Done', 'In Progress');
+  assert.strictEqual(env.master.data[1][rcol('Status') - 1], 'In Progress');
+  assert.strictEqual(auditRows(env)[1][7], 'Done needs the review to be Approved first');
+  edit(env, 2, rcol('Status'), 'Done', 'Approved');
+  assert.strictEqual(env.master.data[1][rcol('Status') - 1], 'Done');
+});
+
+test('installValidation puts dropdowns on Status, Needs review and Reminder profile', () => {
+  const env = setup([]);
+  env.master.data[0] = ['ID', 'Status', 'Needs review', 'Reminder profile'];
+  env.api.installValidation();
+  const lists = env.validations.map((v) => [v.col, v.rule.list.length, v.rule.allowInvalid]);
+  assert.deepStrictEqual(lists, [[2, 9, false], [3, 2, false], [4, 3, false]]);
 });

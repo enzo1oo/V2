@@ -126,9 +126,11 @@ def sender_assignment(
         flags.append(f"Assigned by sender: {person.name} {reason}")
     rules_said = routed.owner or "nobody"
     note = f"Assigned by sender (WhatsApp PROMPT) to {person.name}; rules proposed {rules_said}"
+    boss, doer = owner_and_doer(person, staff)
     return RouteResult(
-        owner=person.name,
-        division=routed.division or person.main_division or None,
+        owner=boss,
+        doer=doer,
+        division=routed.division or next(iter(person.division_list), None),
         catalog_id=routed.catalog_id,
         rule=0,
         note=f"{note} ({routed.note})",
@@ -140,12 +142,68 @@ def unavailable_reason(person: StaffMember, today: date, due: date | None) -> st
     """Why `person` cannot be proposed, or None if available."""
     if person.role == "Manager":
         return "is a manager"
+    if person.role == "Additional help":
+        return "is additional help"  # v1.4 R3: assigned by hand only
     end = person.internship_end
     if end is not None:
         if end < today:
             return f"internship ended {end:%d %b %Y}"
         if due is not None and end < due:
             return f"internship ends {end:%d %b %Y}, before the due date"
+    return None
+
+
+def supervisor(person: StaffMember, staff: list[StaffMember]) -> StaffMember | None:
+    """The full-time person an intern reports to (v1.4 R4); None for anyone else, and for an
+    intern who reports to a manager (R5: that intern owns their own work)."""
+    if person.role != "Intern" or not person.reports_to.strip():
+        return None
+    boss = find_person(person.reports_to, staff)
+    if boss is None or boss.role == "Manager":
+        return None
+    return boss
+
+
+def owner_and_doer(person: StaffMember, staff: list[StaffMember]) -> tuple[str, str]:
+    """(Owner, Doer) when `person` takes a task: an intern under a full-time supervisor does it
+    and the supervisor owns it (R4); everyone else owns and does it (R5)."""
+    boss = supervisor(person, staff)
+    return (boss.name, person.name) if boss else (person.name, person.name)
+
+
+def managers(staff: list[StaffMember]) -> list[StaffMember]:
+    return [person for person in staff if person.role == "Manager"]
+
+
+def default_reviewer(reviewer: str, doer: str, staff: list[StaffMember]) -> StaffMember | None:
+    """The task's Reviewer, else the doer's full-time supervisor, else the first Manager (R7)."""
+    if reviewer.strip():
+        named = find_person(reviewer, staff)
+        if named is not None:
+            return named
+    person = find_person(doer, staff)
+    boss = supervisor(person, staff) if person else None
+    if boss is not None:
+        return boss
+    return next(iter(managers(staff)), None)
+
+
+def delegation_problem(
+    actor: StaffMember, owner: str, doer: str, target: StaffMember, staff: list[StaffMember]
+) -> str | None:
+    """Why `actor` may not hand a task to `target` (v1.4 A2), or None if allowed.
+
+    The Manager may hand any task to anyone; the task's Owner or Doer only to someone who
+    reports to them, or back to themselves."""
+    if actor.role == "Manager":
+        return None
+    is_party = actor.name.casefold() in (owner.strip().casefold(), doer.strip().casefold())
+    if not is_party:
+        return "only the task's Owner, Doer or the Manager can reassign it"
+    if target.name == actor.name:
+        return None
+    if target.reports_to.strip().casefold() != actor.name.casefold():
+        return f"{target.name} does not report to you"
     return None
 
 
@@ -188,16 +246,18 @@ def _catalog_rules(
     )
     if owner is not None:
         note = f"{prefix.format(rule=1)}: {label} → default owner"
+        boss, doer = owner_and_doer(owner, staff)
         return RouteResult(
-            owner=owner.name, division=entry.division or None,
+            owner=boss, doer=doer, division=entry.division or None,
             catalog_id=entry.catalog_id, rule=1, note=note,
         ), []  # fmt: skip
     reasons = [f"default owner {owner_problem}"]
     backup, backup_problem = _owner_problem(entry.backup, staff, today, due, threshold=None)
     if backup is not None:
         note = f"{prefix.format(rule=2)}: {label} → backup; default owner {owner_problem}"
+        boss, doer = owner_and_doer(backup, staff)
         return RouteResult(
-            owner=backup.name, division=entry.division or None,
+            owner=boss, doer=doer, division=entry.division or None,
             catalog_id=entry.catalog_id, rule=2, note=note,
         ), []  # fmt: skip
     reasons.append(f"backup {backup_problem}")
@@ -267,10 +327,11 @@ def route(
 
     # Rule 3: least-loaded available person in the division.
     if division:
+        wanted = division.strip().casefold()
         candidates = [
             person
             for person in staff
-            if person.main_division.strip().casefold() == division.strip().casefold()
+            if wanted in (d.casefold() for d in person.division_list)
             and unavailable_reason(person, today, due) is None
         ]
         if candidates:
@@ -281,8 +342,9 @@ def route(
             )
             if reasons:
                 note += "; " + "; ".join(reasons)
+            boss, doer = owner_and_doer(person, staff)
             return RouteResult(
-                owner=person.name, division=division, catalog_id=matched_id,
+                owner=boss, doer=doer, division=division, catalog_id=matched_id,
                 rule=3, note=note, flags=flags,
             )  # fmt: skip
         reasons.append(f"nobody available in division {division}")

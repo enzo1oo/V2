@@ -398,6 +398,9 @@ class SheetStore:
         records = (r for _, r in tab.records() if str(r.get("ID", "")).strip())
         return _parse(Task, tab, records)
 
+    def master_header(self) -> list[str]:
+        return list(self._tab(MASTER).header)
+
     def task_by_source_id(self, source_id: str) -> Task | None:
         return next((task for task in self.tasks() if task.source_id == source_id), None)
 
@@ -511,6 +514,39 @@ class SheetStore:
                     if str(row[id_index] or "") == task_id:
                         for name, value in changes.items():
                             row[cached.index(name)] = value
+
+    def update_staff(self, name: str, changes: dict[str, Any]) -> None:
+        """Set cells of one Staff row (matched by Name, case-insensitive), by header.
+        A header the tab lacks raises SchemaError naming it."""
+        with self._lock:
+            [values] = self._backend.get([quote_tab("Staff")])
+            tab = TabData.from_values("Staff", values)
+            unknown = [header for header in changes if header not in tab.header]
+            if unknown:
+                raise SchemaError([f"Staff has no column(s) {', '.join(unknown)}"])
+            name_col = tab.index("Name")
+            wanted = name.strip().casefold()
+            row_number = next(
+                (
+                    i + 2
+                    for i, row in enumerate(tab.rows)
+                    if str(row[name_col] or "").strip().casefold() == wanted
+                ),
+                None,
+            )
+            if row_number is None:
+                raise KeyError(name)
+            self._backend.update(
+                [
+                    (
+                        f"{quote_tab('Staff')}!{column_letter(tab.index(header))}{row_number}",
+                        [[to_cell(value)]],
+                    )
+                    for header, value in changes.items()
+                ]
+            )
+            self._tabs.pop("Staff", None)
+            self._staff = None
 
     def append_audit(self, entries: list[AuditEntry]) -> None:
         if not entries:

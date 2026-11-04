@@ -1,9 +1,9 @@
 # GRC Request Intake and Task Assignment — Build Spec v1.2
 
 Status: final design for the build (v1.2: bot mailbox intake, AI Studio Gemini API key; v1.3:
-WhatsApp bot, section 17). Source of truth for Claude Code.
-Sections 15, 16 and 17 record the decisions made while building; where they are more specific than
-the text above, they win. Lines changed for them are marked **(v1.1)**, **(v1.2)** or **(v1.3)**.
+WhatsApp bot, section 17; v1.4: roles, review lifecycle and commands, section 19). Source of truth
+for Claude Code. Sections 15 to 19 record the decisions made while building; where they are more
+specific than the text above, they win. Lines changed for them are marked **(v1.1)** to **(v1.4)**.
 Business context: see `docs/PRD.docx` (PRD with the TRD as Appendix A).
 Owner: Enzo Taslim (builder). Hosting: BRI HK IT (Google Cloud).
 
@@ -65,7 +65,10 @@ Required columns (exact header text):
 **new:** `Original message`, `Files`, `AI summary`, `Deliverables`, `Contacts`, `Source ID`.
 
 - `ID`: `G-0001` upward. The next number is the highest existing `G-` number + 1, computed under the write lock.
-- `Status` values: `Proposed`, `Not Started`, `In Progress`, `On Hold`, `Done`, `Cancelled`.
+- `Status` values: `Proposed`, `Not Started`, `In Progress`, **(v1.4)** `In Review`, `Approved`,
+  `Returned`, `On Hold`, `Done`, `Cancelled`. **(v1.4)** New columns at the right: `Needs review`,
+  `Reviewer`, `Review notes`, `Reminder profile`, `Review file` (section 19). They are optional:
+  without them the service runs, `/health` warns, and a command that needs one names it.
 - `Source`: `Email`, `Google Chat`, **(v1.3)** `WhatsApp`, `Recurring <CatalogID> <yyyy-mm>`,
   `Manual`.
 - `Source ID`: Gmail message ID, Chat message name, or the recurring key. Used to skip duplicates.
@@ -77,7 +80,9 @@ Required columns (exact header text):
 `Name`, `Email`, `Main division`, `Role` (Staff/Intern/Manager), `Internship end date`,
 `Capacity (1 = full time)`, `Weighted open load` (formula; read its computed value).
 **(v1.3)** Optional `WhatsApp`: the person's number in international format (`+852 …`); needed to
-use the WhatsApp bot and to get WhatsApp reminders.
+use the WhatsApp bot and to get WhatsApp reminders. **(v1.4)** Optional `Title`, `Department`,
+`Divisions`, `Reports to`, `Reminder channel`, `WhatsApp opt-in`, `Reminders paused`; `Role` values
+`Manager`, `Full time`, `Intern`, `Additional help` (`Staff` reads as `Full time`). Section 19.
 
 ### Catalog
 `Catalog ID`, `Report type`, `Division`, `Regulator / Institution`, `Recurrence`, `Default owner`,
@@ -590,4 +595,65 @@ WhatsApp Cloud API with a number and app that BRI registers in Meta Business Man
    logged (names only) and `/health` and `/healthz` answer 503 with the lists; sheet problems are
    re-checked at most once a minute, so fixing the sheet needs no redeploy.
 7. **Not done:** `TEST_MODE` (no such mode exists in the code).
+
+## 19. Roles, review lifecycle and commands (v1.4, part 1 of 3; approved 4 Nov 2026)
+
+Parts 2 (reminder engine, channels, WhatsApp templates) and 3 (Recurring tab) follow; until part 2,
+the event notices below go by email, and the daily digest and WhatsApp reminder stay as they are.
+
+**Roles and authority (R1–R11).** One Staff row per person; real names live only in the Sheet.
+- `Divisions` (`;`-separated) replaces `Main division` (still read when `Divisions` is blank).
+  Division names must match Catalog `Division` and LetterCodes `Route to division` exactly;
+  `/health` lists divisions nobody covers as warnings (still 200).
+- `Additional help` and `Manager` are never proposed by routing; they can be assigned by hand.
+- An intern whose `Reports to` is a full-time person: when routing (rules 1–4), a PROMPT or a
+  Recurring row picks the intern, **Doer = intern, Owner = supervisor**. An intern who reports to
+  the Manager is Owner and Doer. Rule 3 still takes the least-loaded available person; internship
+  end dates still apply.
+- **Reviewer** of a task: its `Reviewer` column, else the Doer's full-time supervisor, else the
+  first Manager in Staff. The Manager may approve or return any task.
+- Manager-only commands: `semua`/`all`, `recurring`, `pause`, `resume`.
+
+**Lifecycle.** Open statuses: Not Started, In Progress, In Review, Approved, Returned, On Hold.
+- `review` (from Not Started, In Progress, Returned) → In Review; `approve` / `return <notes>`
+  (reviewer or Manager, only from In Review) → Approved / Returned with `Review notes`.
+- Done needs `Submitted date` and `Link`; a task with `Needs review` = Yes must be Approved first.
+  The Apps Script enforces both for Sheet edits, and undoes Approved/Returned set by anyone but
+  the reviewer or a Manager (`installValidation()` adds the dropdowns).
+- Every change by command is written to AuditLog with `Command via WhatsApp` / `Command via
+  Email`; Sheet edits keep the Apps Script audit. Commands record the new status in `_state`, so
+  the change job does not announce it again; Sheet edits to In Review / Approved / Returned are
+  announced by the change job.
+
+**Commands** (one parser, `app/commands.py`; WhatsApp messages and the first line of an email
+reply from a Staff address). A verb that acts on a task needs the task ID, unless the message
+replies to a bot message about one task (WhatsApp reply, or an email whose subject has
+`[GRC] G-xxxx` / the intake thread); so a forwarded request that starts with "review" is still a
+request. Indonesian and English synonyms.
+- `progress G-0012 50` → Progress 0.5, Not Started → In Progress.
+- `review G-0012` (+ file) → files kept, `Review file` set, In Review, reviewer emailed the file
+  with `approve` / `return` instructions.
+- `done G-0012` (+ proof) → proof kept, `Link` = "In the GRC bot mailbox: …", `Submitted date` =
+  today, Done. Without a file: allowed only if `Link` is already filled.
+- `files G-0012` → the task's files: email attachments up to 20 MB in total (the rest by name);
+  on WhatsApp the files go to the person's email.
+- `tugas` / `today` (`hari ini`) / `week` (`minggu ini`) → the person's open tasks (as Doer or
+  Owner); `semua` → all open tasks by Doer; `recurring` → part 3.
+- `approve G-0012`, `return G-0012 <notes>` → reviewer or Manager only.
+- `pause <name>` / `resume <name>` → Staff `Reminders paused` = Yes / blank; paused people get no
+  notices (assignment emails included; they wait until `resume`).
+- **Delegation:** `assign G-0012 to <name>` (`kasih … ke …`, `tugaskan … ke …`), `assign that to
+  <name>` in reply to a bot message about that task (on WhatsApp, also the newest single-task bot
+  message within 24 h), `assign G-0012 to me`. The Owner or Doer may hand it only to someone who
+  reports to them (or back to themselves); the Manager to anyone (Owner/Doer by the role rule).
+  Only after approval (not Proposed). The new Doer gets the assignment email at once.
+- A wrong role, an unknown task or a missing value: a clear reply and nothing changed.
+
+**Files (F1–F4): no Drive.** `File storage` stays `None`. Files live in the bot mailbox: email
+attachments in their emails; WhatsApp files (intake and commands) are downloaded on arrival and
+kept as a never-sent message labelled `GRC/Files`, subject `[GRC files] <task ID>`
+(`messages.insert`, not in the inbox). `Files`, `Link` and `Review file` hold the names and
+"In the GRC bot mailbox". Assignment, review and `files` messages attach the task's files up to
+20 MB in total; WhatsApp sends no files in part 1. Small inline images (< 100 KB) in email replies
+are signatures, not proof.
 

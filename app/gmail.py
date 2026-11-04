@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -21,6 +22,7 @@ from datetime import datetime
 from email.header import decode_header, make_header
 from email.message import EmailMessage
 from email.utils import formataddr, parseaddr
+from html import escape as html_escape
 from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
@@ -28,7 +30,7 @@ from pydantic import BaseModel, Field
 from app import clock
 from app.extract.clean import strip_noise
 from app.models import AppConfig, Attachment, AuditEntry, FailureRow, OutgoingEmail, RawRequest
-from app.notify import acknowledgement_email
+from app.notify import acknowledgement_email, with_files
 from app.pipeline import SERVICE_USER, Services, process_request
 from app.settings import Settings
 from app.sheets import SchemaError
@@ -48,8 +50,13 @@ SCOPES = (
     "https://www.googleapis.com/auth/gmail.send",
 )
 LOGGED_LABEL = "GRC/Logged"
+FILES_LABEL = "GRC/Files"  # v1.4: files kept for tasks (proofs, review files, WhatsApp media)
+FILES_SUBJECT = "[GRC files]"
 IGNORED_LABEL = "GRC/Ignored"
 REPLY_LABEL = "GRC/Reply"
+COMMAND_LABEL = "GRC/Command"  # v1.4: a reply whose first line was a task command
+_TASK_SUBJECT = re.compile(r"\[GRC\]\s+(G-\d+)\b")
+SIGNATURE_IMAGE_BYTES = 100 * 1024  # small inline images (logos) are not proof files
 FAILED_LABEL = "GRC/Failed"
 UNREAD, INBOX = "UNREAD", "INBOX"  # Gmail system labels
 MAX_FAILURES = 3
@@ -105,6 +112,16 @@ class GmailClient(Protocol):
         ...
 
     def send(self, email: OutgoingEmail, sender_name: str) -> None: ...
+
+    def store_files(self, task_id: str, attachments: list[Attachment]) -> None:
+        """Keep files for a task in the bot mailbox (v1.4 F2): a message labelled `GRC/Files`,
+        subject `[GRC files] <task ID>`, never sent and not in the inbox."""
+        ...
+
+    def task_files(self, task_id: str, source_id: str = "") -> list[Attachment]:
+        """Every file the bot mailbox holds for a task (v1.4 F3): the original email
+        (`source_id`), messages whose subject names the task, and the stored copies."""
+        ...
 
 
 # --- Parsing (pure) ----------------------------------------------------------------------------
@@ -223,6 +240,14 @@ def build_mime(
         message["References"] = f"{references} {in_reply_to}".strip()
     message.set_content(email.text)
     message.add_alternative(email.html, subtype="html")
+    for attachment in email.attachments:
+        maintype, _, subtype = (attachment.mime or "application/octet-stream").partition("/")
+        message.add_attachment(
+            attachment.data,
+            maintype=maintype or "application",
+            subtype=subtype or "octet-stream",
+            filename=attachment.filename,
+        )
     return base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
 
 
@@ -338,6 +363,49 @@ class GoogleGmailClient:
         raw = build_mime(email, self.address(), sender_name)
         self._execute(self._users().messages().send(userId="me", body={"raw": raw}))
 
+    def store_files(self, task_id: str, attachments: list[Attachment]) -> None:
+        if not attachments:
+            return
+        names = ", ".join(a.filename for a in attachments)
+        email = OutgoingEmail(
+            to=[self.address()],
+            subject=f"{FILES_SUBJECT} {task_id}",
+            text=f"Files kept for {task_id}: {names}",
+            html=f"<p>Files kept for {task_id}.</p>",
+            attachments=attachments,
+        )
+        raw = build_mime(email, self.address(), "GRC tracker")
+        label = self._label_id(FILES_LABEL, create=True)
+        self._execute(
+            self._users().messages().insert(userId="me", body={"raw": raw, "labelIds": [label]})
+        )
+
+    def task_files(self, task_id: str, source_id: str = "") -> list[Attachment]:
+        query = f'subject:"{task_id}" has:attachment'
+        found = self._execute(
+            self._users()
+            .messages()
+            .list(userId="me", q=query, maxResults=50, includeSpamTrash=False)
+        ).get("messages", [])
+        ids = [source_id] if source_id and not source_id.startswith(("wamid", "Recurring")) else []
+        ids += [item["id"] for item in found if item["id"] not in ids]
+        files: list[Attachment] = []
+        seen: set[tuple[str, int]] = set()
+        for message_id in ids:
+            try:
+                message = self.get_message(message_id)
+            except GmailAuthError:
+                raise
+            except Exception as error:  # e.g. the original was deleted by hand
+                logger.warning("task_file_missing", extra={"error_type": type(error).__name__})
+                continue
+            for attachment in message.attachments:
+                key = (attachment.filename, attachment.size)
+                if attachment.data and key not in seen:
+                    seen.add(key)
+                    files.append(attachment)
+        return files
+
 
 # --- The /jobs/gmail run -----------------------------------------------------------------------
 
@@ -351,6 +419,7 @@ class InboxRun(BaseModel):
     failed: int = 0
     gave_up: int = 0
     ack_failed: int = 0
+    commands: int = 0  # v1.4
 
 
 def _record_failure(services: Services, key: str, error: Exception) -> int:
@@ -418,12 +487,77 @@ def _ignore_reason(message: GmailMessage, bot: str, config: AppConfig) -> str:
     return ""
 
 
+def _email_command(
+    gmail: GmailClient,
+    services: Services,
+    message: GmailMessage,
+    logged: list[str],
+    sheet_url: str,
+) -> bool:
+    """A task command in the first line of a Staff member's reply (DESIGN section 19): run it,
+    answer in the thread, then label `GRC/Command`, read and archive. False: not a command."""
+    from app.commands import parse_command
+    from app.lifecycle import CommandContext, run_command
+
+    store = services.store
+    person = next(
+        (p for p in store.staff() if p.email.strip().lower() == message.sender_email), None
+    )
+    if person is None:
+        return False
+    found = _TASK_SUBJECT.search(message.subject or "")
+    context = found.group(1) if found else None
+    if context is None and logged:
+        task = next((t for t in (store.task_by_source_id(i) for i in logged) if t), None)
+        context = task.id if task else None
+    text = strip_noise(message.body_text) or message.body_text
+    command = parse_command(text, has_context=context is not None)
+    if command is None:
+        return False
+    files = [
+        a
+        for a in message.attachments
+        if a.data and not (a.mime.startswith("image/") and a.size < SIGNATURE_IMAGE_BYTES)
+    ]
+    result = run_command(
+        command,
+        CommandContext(
+            store=store,
+            gmail=gmail,
+            actor=person,
+            channel="Email",
+            sheet_url=sheet_url,
+            files=files,
+            context_task_id=context,
+        ),
+    )
+    subject = (
+        message.subject if message.subject.lower().startswith("re:") else (f"Re: {message.subject}")
+    )
+    reply = OutgoingEmail(
+        to=[message.sender_email],
+        subject=subject,
+        text=result.reply,
+        html=f"<pre>{html_escape(result.reply)}</pre>",
+    )
+    try:
+        gmail.reply(message, with_files(reply, result.attachments), store.config().sender_name)
+    except GmailAuthError:
+        raise
+    except Exception as error:
+        logger.error("command_reply_failed", extra={"error_type": type(error).__name__})
+    _modify(gmail, message.id, [COMMAND_LABEL], [UNREAD, INBOX])
+    logger.info("email_command", extra={"kind": command.name, "n_changed": int(result.changed)})
+    return True
+
+
 def process_inbox(
     gmail: GmailClient,
     services: Services,
     limit: int = MESSAGES_PER_RUN,
     budget_seconds: float = RUN_BUDGET_SECONDS,
     monotonic: Callable[[], float] = time.monotonic,
+    sheet_url: str = "",
 ) -> InboxRun:
     """Handle up to `limit` unread inbox messages, starting no new one after `budget_seconds`.
     Stops on schema or Gmail auth errors, leaving the remaining messages unread for the next run."""
@@ -448,6 +582,11 @@ def process_inbox(
                 logger.info("message_ignored", extra={"reason": reason})
                 continue
             logged = [i for i in gmail.logged_message_ids(message.thread_id) if i != message.id]
+            if services.store.task_by_source_id(message.id) is None and _email_command(
+                gmail, services, message, logged, sheet_url
+            ):
+                run.commands += 1
+                continue
             if logged and services.store.task_by_source_id(message.id) is None:
                 _note_reply(services, message, logged)
                 _modify(gmail, message.id, [REPLY_LABEL], [UNREAD, INBOX])

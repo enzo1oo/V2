@@ -16,6 +16,7 @@ from app.models import (
     AppConfig,
     AuditEntry,
     CatalogEntry,
+    OutgoingEmail,
     RawRequest,
     StaffMember,
     StateRow,
@@ -27,6 +28,7 @@ from app.notify import (
     manager_digest,
     personal_digest,
     task_line,
+    with_files,
 )
 from app.pipeline import SERVICE_USER, Services, process_request
 from app.route import find_person, load_ratio
@@ -91,11 +93,16 @@ def run_changes(store: SheetStore, gmail: GmailClient, sheet_url: str) -> Change
         notified_doer = previous.notified_doer if previous else ""
         notified_at = previous.notified_at if previous else None
         rows[task.id] = _state_row(task, notified_doer, notified_at)
+        if previous is not None and previous.status != task.status:
+            _status_event(store, gmail, task, sheet_url)  # v1.4: a review step edited in Sheet
         doer = task.doer.strip()
         if task.status not in OPEN_STATUSES or not doer or doer == notified_doer:
             continue
+        person = find_person(doer, staff)
+        if person is not None and person.paused:
+            continue  # v1.4 decision 12: stays pending until `resume`
         try:
-            email = assignment_email(task, staff, sheet_url)
+            email = _assignment_with_files(task, staff, sheet_url, gmail)
         except MissingEmail:
             run.not_sent += 1
             if NO_EMAIL_FLAG not in task.flags:
@@ -122,6 +129,55 @@ def run_changes(store: SheetStore, gmail: GmailClient, sheet_url: str) -> Change
     store.write_state(list(rows.values()))
     logger.info("changes_run", extra=_log_counts(run))
     return run
+
+
+def _status_event(store: SheetStore, gmail: GmailClient, task: Task, sheet_url: str) -> None:
+    """In Review / Approved / Returned set in the Sheet: tell the reviewer or the doer."""
+    from app.lifecycle import EVENT_STATUSES, notify
+
+    event = EVENT_STATUSES.get(task.status)
+    if event is None:
+        return
+    try:
+        notify(event, task, store, gmail, sheet_url)
+    except GmailAuthError:
+        raise
+    except Exception as error:  # a notice must never stop the change job
+        logger.error("event_failed", extra={"task_id": task.id,
+                                            "error_type": type(error).__name__})  # fmt: skip
+
+
+def _assignment_with_files(
+    task: Task, staff: list[StaffMember], sheet_url: str, gmail: GmailClient
+) -> OutgoingEmail:
+    """The assignment email with the task's files from the bot mailbox (v1.4 decision F4)."""
+    email = assignment_email(task, staff, sheet_url)
+    try:
+        files = gmail.task_files(task.id, task.source_id)
+    except GmailAuthError:
+        raise
+    except Exception as error:
+        logger.warning(
+            "task_files_failed", extra={"task_id": task.id, "error_type": type(error).__name__}
+        )
+        files = []
+    return with_files(email, files)
+
+
+def send_assignment(store: SheetStore, gmail: GmailClient, task: Task, sheet_url: str) -> bool:
+    """The assignment email now (after `assign`), recorded in `_state` so the change job does
+    not send it again. False when it could not go (no email, paused, send failed)."""
+    staff = store.staff()
+    person = find_person(task.doer, staff)
+    if person is None or person.paused or not person.email.strip():
+        return False
+    email = _assignment_with_files(task, staff, sheet_url, gmail)
+    gmail.send(email, store.config().sender_name)
+    state = store.state()
+    state[task.id] = _state_row(task, task.doer.strip(), clock.now())
+    store.write_state(list(state.values()))
+    _audit(store, task.id, "Assignment emailed", "Doer", task.doer.strip())
+    return True
 
 
 def _audit(store: SheetStore, task_id: str, action: str, field: str, value: str) -> None:

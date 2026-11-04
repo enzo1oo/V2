@@ -8,8 +8,22 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
-Status = Literal["Proposed", "Not Started", "In Progress", "On Hold", "Done", "Cancelled"]
-OPEN_STATUSES: frozenset[str] = frozenset({"Not Started", "In Progress", "On Hold"})
+Status = Literal[
+    "Proposed",
+    "Not Started",
+    "In Progress",
+    "In Review",
+    "Approved",
+    "Returned",
+    "On Hold",
+    "Done",
+    "Cancelled",
+]
+# v1.4 (DESIGN section 19): the review statuses are open too; Returned works like In Progress.
+OPEN_STATUSES: frozenset[str] = frozenset(
+    {"Not Started", "In Progress", "In Review", "Approved", "Returned", "On Hold"}
+)
+Role = Literal["Manager", "Full time", "Intern", "Additional help", "Staff"]
 RequestSource = Literal["Email", "Google Chat", "WhatsApp", "Recurring", "Manual"]
 
 
@@ -77,6 +91,7 @@ class OutgoingEmail(BaseModel):
     subject: str
     text: str
     html: str
+    attachments: list[Attachment] = Field(default_factory=list)  # v1.4: real file attachments
 
 
 class Contact(BaseModel):
@@ -96,14 +111,35 @@ class StaffMember(_SheetRow):
     name: str = Field(alias="Name")
     email: str = Field(default="", alias="Email")
     main_division: str = Field(default="", alias="Main division")
-    role: Literal["Staff", "Intern", "Manager"] = Field(default="Staff", alias="Role")
+    role: Role = Field(default="Full time", alias="Role")
     internship_end: date | None = Field(default=None, alias="Internship end date")
     capacity: float = Field(default=1.0, alias="Capacity (1 = full time)")
     weighted_open_load: float = Field(default=0.0, alias="Weighted open load")
     # v1.3, optional column: the WhatsApp number in international format (e.g. +852 9123 4567).
     whatsapp: str = Field(default="", alias="WhatsApp")
+    # v1.4 roles and authority (DESIGN section 19), all optional columns.
+    title: str = Field(default="", alias="Title")
+    department: str = Field(default="", alias="Department")
+    divisions: str = Field(default="", alias="Divisions")  # ";"-separated; blank = Main division
+    reports_to: str = Field(default="", alias="Reports to")
+    reminder_channel: str = Field(default="", alias="Reminder channel")
+    whatsapp_opt_in: date | None = Field(default=None, alias="WhatsApp opt-in")
+    reminders_paused: str = Field(default="", alias="Reminders paused")
 
-    _blanks = field_validator("internship_end", mode="before")(_blank_to_none)
+    _blanks = field_validator("internship_end", "whatsapp_opt_in", mode="before")(_blank_to_none)
+
+    @property
+    def division_list(self) -> list[str]:
+        raw = self.divisions if self.divisions.strip() else self.main_division
+        return [part.strip() for part in raw.replace(",", ";").split(";") if part.strip()]
+
+    @property
+    def is_full_time(self) -> bool:
+        return self.role in ("Full time", "Staff")
+
+    @property
+    def paused(self) -> bool:
+        return self.reminders_paused.strip().lower() in {"yes", "y", "ya", "true"}
 
     @property
     def wa_id(self) -> str:
@@ -113,8 +149,10 @@ class StaffMember(_SheetRow):
     @field_validator("role", mode="before")
     @classmethod
     def _role_default(cls, value: object) -> object:
-        # The Role column is optional in the sheet; a blank role is ordinary staff.
-        return "Staff" if _blank_to_none(value) is None else value
+        # The Role column is optional in the sheet; a blank role (and the old "Staff") is full time.
+        if _blank_to_none(value) is None or str(value).strip() == "Staff":
+            return "Full time"
+        return str(value).strip()
 
     @field_validator("capacity", mode="before")
     @classmethod
@@ -210,6 +248,12 @@ class Task(_SheetRow):
     deliverables: str = Field(default="", alias="Deliverables")
     contacts: str = Field(default="", alias="Contacts")
     source_id: str = Field(default="", alias="Source ID")
+    # v1.4 review lifecycle (DESIGN section 19), appended at the right of Master.
+    needs_review: str = Field(default="", alias="Needs review")
+    reviewer: str = Field(default="", alias="Reviewer")
+    review_notes: str = Field(default="", alias="Review notes")
+    reminder_profile: str = Field(default="", alias="Reminder profile")
+    review_file: str = Field(default="", alias="Review file")
 
     _dates = field_validator("start", "due_date", "submitted_date", "last_updated", mode="before")(
         _blank_to_none
@@ -219,9 +263,30 @@ class Task(_SheetRow):
     def flags(self) -> list[str]:
         return [part.strip() for part in self.flag.split(";") if part.strip()]
 
+    @property
+    def review_needed(self) -> bool:
+        return self.needs_review.strip().lower() in {"yes", "y", "ya", "true"}
 
+    @property
+    def progress_value(self) -> float | None:
+        """Progress as a fraction (0.5), from 0.5, 50 or "50%"; None when blank or unreadable."""
+        text = self.progress.strip().rstrip("%").strip()
+        if not text:
+            return None
+        try:
+            value = float(text)
+        except ValueError:
+            return None
+        return value / 100 if value > 1 or self.progress.strip().endswith("%") else value
+
+
+# v1.4 columns are optional so a sheet without them keeps working: /health warns, and a command
+# that needs one says which column to add.
+REVIEW_COLUMNS: tuple[str, ...] = (
+    "Needs review", "Reviewer", "Review notes", "Reminder profile", "Review file",
+)  # fmt: skip
 MASTER_REQUIRED_COLUMNS: tuple[str, ...] = (
-    *(field.alias for field in Task.model_fields.values() if field.alias),
+    *(f.alias for f in Task.model_fields.values() if f.alias and f.alias not in REVIEW_COLUMNS),
     "Weight",
 )
 
@@ -231,6 +296,7 @@ MASTER_REQUIRED_COLUMNS: tuple[str, ...] = (
 
 class RouteResult(BaseModel):
     owner: str | None = None
+    doer: str | None = None  # v1.4: an intern under a full-time supervisor (owner); None = owner
     division: str | None = None
     catalog_id: str | None = None
     rule: int
@@ -312,7 +378,8 @@ class WaPending(_SheetRow):
     """
 
     key: str = Field(alias="Key")
-    kind: Literal["draft", "confirm"] = Field(alias="Kind")
+    # "sent" (v1.4): a bot message about one task, so a reply to it knows the task.
+    kind: Literal["draft", "confirm", "sent"] = Field(alias="Kind")
     sender: str = Field(default="", alias="Sender")
     text: str = Field(default="", alias="Text")
     prompt: str = Field(default="", alias="Prompt")
@@ -447,11 +514,18 @@ REQUIRED_CONFIG_SETTINGS: tuple[str, ...] = tuple(
     field.alias for field in AppConfig.model_fields.values() if field.alias and field.is_required()
 )
 
+OPTIONAL_STAFF_COLUMNS = frozenset(
+    {"WhatsApp", "Title", "Department", "Divisions", "Reports to", "Reminder channel",
+     "WhatsApp opt-in", "Reminders paused"}
+)  # fmt: skip
+
 REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
     "Master": MASTER_REQUIRED_COLUMNS,
-    # `WhatsApp` (v1.3) is optional: only staff who use the WhatsApp bot need it.
+    # `WhatsApp` (v1.3) and the v1.4 role and channel columns are optional.
     "Staff": tuple(
-        f.alias for f in StaffMember.model_fields.values() if f.alias and f.alias != "WhatsApp"
+        f.alias
+        for f in StaffMember.model_fields.values()
+        if f.alias and f.alias not in OPTIONAL_STAFF_COLUMNS
     ),
     "Catalog": tuple(f.alias for f in CatalogEntry.model_fields.values() if f.alias),
     "LetterCodes": ("Letter code", "Route to division"),

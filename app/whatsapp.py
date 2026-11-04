@@ -36,15 +36,17 @@ from pydantic import BaseModel, Field, SecretStr
 
 from app import clock
 from app.chat import logged_text, person_tasks_text
-from app.extract.ai import is_pdf
+from app.commands import parse_command
 from app.extract.rules import find_dates
+from app.gmail import GmailClient
 from app.jobs import personal_buckets
+from app.lifecycle import CommandContext, CommandResult, run_command
 from app.models import (
     OPEN_STATUSES,
-    AppConfig,
     Attachment,
     AuditEntry,
     FailureRow,
+    OutgoingEmail,
     RawRequest,
     RouteResult,
     StaffMember,
@@ -52,6 +54,7 @@ from app.models import (
     WaPending,
     wa_number,
 )
+from app.notify import with_files
 from app.pipeline import SERVICE_USER, Services, process_request
 from app.route import NEEDS_REVIEW_FLAG, match_staff_name, sender_assignment
 from app.sheets import SheetStore
@@ -133,7 +136,9 @@ class WhatsAppError(Exception):
 
 
 class WhatsAppClient(Protocol):
-    def send_text(self, to: str, text: str) -> None: ...
+    def send_text(self, to: str, text: str) -> str | None:
+        """Send a text; returns the message ID (v1.4: replies to it carry it as context)."""
+        ...
 
     def send_template(self, to: str, name: str, language: str, params: list[str]) -> None: ...
 
@@ -171,15 +176,19 @@ class GraphWhatsApp:
             raise ValueError("WhatsApp media over 25 MB")
         return data
 
-    def _send(self, to: str, message: dict[str, Any]) -> None:
+    def _send(self, to: str, message: dict[str, Any]) -> str | None:
         url = f"{GRAPH_URL}/{self._version}/{self._phone_number_id}/messages"
-        self._call(
+        data = self._call(
             url,
             {"messaging_product": "whatsapp", "recipient_type": "individual", "to": to, **message},
         )
+        try:
+            return str(json.loads(data or b"{}").get("messages", [{}])[0].get("id") or "") or None
+        except (ValueError, IndexError, AttributeError):
+            return None
 
-    def send_text(self, to: str, text: str) -> None:
-        self._send(
+    def send_text(self, to: str, text: str) -> str | None:
+        return self._send(
             to, {"type": "text", "text": {"preview_url": False, "body": text[:MAX_TEXT_CHARS]}}
         )
 
@@ -276,6 +285,7 @@ class WAMessage(BaseModel):
     kind: Literal["text", "media", "other"]
     text: str = ""
     media: list[WAMedia] = Field(default_factory=list)
+    context_id: str = ""  # v1.4: the bot message this one replies to (WhatsApp "reply")
 
 
 def signature_ok(app_secret: str, body: bytes, header: str | None) -> bool:
@@ -334,6 +344,7 @@ def parse_webhook(payload: dict[str, Any], phone_number_id: str) -> list[WAMessa
                         kind="text" if kind == "text" else "media" if media else "other",
                         text=text,
                         media=media,
+                        context_id=str((item.get("context") or {}).get("id", "")),
                     )
                 )
     return messages
@@ -363,17 +374,115 @@ class WaContext:
     services: Services
     wa: WhatsAppClient
     queue: TaskQueue
+    gmail: GmailClient | None = None  # v1.4: files kept in the bot mailbox, commands
+    sheet_url: str = ""
 
     @property
     def store(self) -> SheetStore:
         return self.services.store
 
 
-def _reply(ctx: WaContext, to: str, text: str) -> None:
+def _reply(ctx: WaContext, to: str, text: str, task_id: str = "") -> None:
+    """Send a text. Messages about one task are remembered (v1.4), so a WhatsApp reply to them,
+    or "assign that to …", knows the task."""
     try:
-        ctx.wa.send_text(to, text)
+        message_id = ctx.wa.send_text(to, text)
     except Exception as error:  # the state change already happened; a resend would repeat it
         logger.error("wa_reply_failed", extra={"error_type": type(error).__name__})
+        return
+    if not message_id:
+        return
+    now = clock.now()
+    sent = WaPending(
+        key=message_id,
+        kind="sent",
+        sender=to,
+        task_id=task_id,
+        status="done",
+        created_at=now,
+        updated_at=now,
+    )
+    try:
+        ctx.store.edit_wa_pending(lambda rows: rows.append(sent))
+    except Exception as error:
+        logger.warning("wa_sent_not_recorded", extra={"error_type": type(error).__name__})
+
+
+def _context_task(ctx: WaContext, message: WAMessage, implicit: bool) -> str | None:
+    """The task of the bot message replied to; with `implicit`, else the task of the newest
+    message the bot sent this person (if it was about one task, within 24 hours)."""
+    rows = [r for r in ctx.store.wa_pending() if r.kind == "sent"]
+    if message.context_id:
+        replied = next((r for r in rows if r.key == message.context_id), None)
+        return (replied.task_id or None) if replied else None
+    if not implicit:
+        return None
+    since = clock.now() - timedelta(hours=CONFIRM_HOURS)
+    mine = [r for r in rows if r.sender == message.sender and (r.created_at or since) >= since]
+    newest = max(mine, key=lambda r: r.created_at or since, default=None)
+    return (newest.task_id or None) if newest else None
+
+
+def _download(ctx: WaContext, media: list[WAMedia]) -> tuple[list[Attachment], list[str]]:
+    """Every file now: Meta's media links expire (v1.4 decision F2)."""
+    files: list[Attachment] = []
+    failed: list[str] = []
+    for item in media:
+        try:
+            data = ctx.wa.download_media(item.id)
+        except Exception as error:
+            logger.warning("wa_media_failed", extra={"error_type": type(error).__name__})
+            failed.append(item.filename)
+            continue
+        files.append(Attachment(filename=item.filename, mime=item.mime, data=data))
+    return files, failed
+
+
+def _handle_command(message: WAMessage, person: StaffMember, ctx: WaContext) -> str | None:
+    """Run a task command (DESIGN section 19); None when the message is not one."""
+    text = message.text.strip()
+    explicit = _context_task(ctx, message, implicit=False) if message.context_id else None
+    command = parse_command(text, has_context=explicit is not None)
+    if command is None or ctx.gmail is None:
+        return None
+    context = explicit
+    if command.name == "assign" and command.task_id is None and context is None:
+        context = _context_task(ctx, message, implicit=True)  # "assign that to Cia" (A1)
+    files, failed = _download(ctx, message.media)
+    result = run_command(
+        command,
+        CommandContext(
+            store=ctx.store,
+            gmail=ctx.gmail,
+            actor=person,
+            channel="WhatsApp",
+            sheet_url=ctx.sheet_url,
+            files=files,
+            context_task_id=context,
+        ),
+    )
+    reply = result.reply
+    if failed:
+        reply += "\nI could not download: " + ", ".join(failed) + ". Please send it again."
+    if result.attachments:
+        reply += _email_files(ctx, person, result)
+    _reply(ctx, message.sender, reply, result.task_id or "")
+    return f"command_{command.name}"
+
+
+def _email_files(ctx: WaContext, person: StaffMember, result: CommandResult) -> str:
+    """WhatsApp does not carry files unless Config says so (decision F3): email them instead."""
+    if not person.email.strip() or ctx.gmail is None:
+        return "\nI have no email address for you to send the files to."
+    subject = f"[GRC] {result.task_id} – files"
+    text = result.reply
+    email = OutgoingEmail(to=[person.email.strip()], subject=subject, text=text, html=text)
+    try:
+        ctx.gmail.send(with_files(email, result.attachments), ctx.store.config().sender_name)
+    except Exception as error:
+        logger.error("wa_files_email_failed", extra={"error_type": type(error).__name__})
+        return "\nI could not email the files; try again later."
+    return "\nThe files are in your email."
 
 
 def _person(store: SheetStore, sender: str) -> StaffMember | None:
@@ -441,6 +550,10 @@ def handle_message(message: WAMessage, ctx: WaContext, now: datetime | None = No
         _reply(ctx, message.sender, NOT_REGISTERED_TEXT)
         return "not_registered"
     text = message.text.strip()
+    if message.kind in ("text", "media"):
+        handled = _handle_command(message, person, ctx)
+        if handled is not None:
+            return handled
     if message.kind == "text":
         command = text.lower().strip(" .!?")
         if command in {"help", "/help", "menu"}:
@@ -586,7 +699,7 @@ def _apply_late_prompt(task_id: str, prompt: str, ctx: WaContext, now: datetime)
         changes.update(
             {
                 "Owner": routed.owner,
-                "Doer": routed.owner,
+                "Doer": routed.doer or routed.owner,
                 "Division": routed.division or task.division,
                 "Routing note": routed.note,
                 "Flag": "; ".join(dict.fromkeys([*flags, *routed.flags])),
@@ -720,28 +833,6 @@ def _set_status(
             row.task_id = task_id or row.task_id
 
 
-def _attachments(
-    media: list[WAMedia], config: AppConfig, wa: WhatsAppClient
-) -> tuple[list[Attachment], list[str]]:
-    """Downloaded where needed (PDFs for the AI, everything for Drive); names only otherwise."""
-    attachments: list[Attachment] = []
-    failed: list[str] = []
-    for item in media:
-        candidate = Attachment(filename=item.filename, mime=item.mime, data=b"")
-        wanted = config.file_storage == "Drive" or (config.ai_reads_pdfs and is_pdf(candidate))
-        if not wanted:
-            attachments.append(candidate)
-            continue
-        try:
-            data = wa.download_media(item.id)
-        except Exception as error:
-            logger.warning("wa_media_failed", extra={"error_type": type(error).__name__})
-            failed.append(item.filename)
-            continue
-        attachments.append(Attachment(filename=item.filename, mime=item.mime, data=data))
-    return attachments, failed
-
-
 def _log_draft(draft: WaPending, ctx: WaContext, now: datetime) -> str:
     """process_request for a claimed draft; returns the task ID ("" for a PROMPT alone)."""
     store = ctx.store
@@ -756,8 +847,7 @@ def _log_draft(draft: WaPending, ctx: WaContext, now: datetime) -> str:
         )
         return ""
     person = _person(store, draft.sender)
-    config = store.config()
-    attachments, failed = _attachments(media, config, ctx.wa)
+    attachments, failed = _download(ctx, media)
     raw = RawRequest(
         source="WhatsApp",
         source_id=draft.key,
@@ -774,7 +864,16 @@ def _log_draft(draft: WaPending, ctx: WaContext, now: datetime) -> str:
     if result.created:
         flags = "; ".join(dict.fromkeys([*result.flags, DEADLINE_FLAG]))
         store.update_task(result.task_id, {"Flag": flags})
-    _reply(ctx, draft.sender, _logged_reply(result, failed))
+        stored = [a for a in attachments if a.data]
+        if stored and ctx.gmail is not None:  # kept in the bot mailbox (v1.4 decision F2)
+            try:
+                ctx.gmail.store_files(result.task_id, stored)
+            except Exception as error:
+                logger.error(
+                    "wa_files_not_kept",
+                    extra={"task_id": result.task_id, "error_type": type(error).__name__},
+                )
+    _reply(ctx, draft.sender, _logged_reply(result, failed), result.task_id)
     if result.created:
         store.edit_wa_pending(lambda rows: _ask_deadline(rows, draft.sender, result.task_id, now))
     return result.task_id

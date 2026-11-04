@@ -50,7 +50,7 @@ def test_gmail_job(fixture_text):
     assert response.status_code == 200
     assert response.json() == {
         "job": "gmail", "messages": 2, "created": 1, "duplicates": 0, "ignored": 1, "replies": 0,
-        "failed": 0, "gave_up": 0, "ack_failed": 0,
+        "failed": 0, "gave_up": 0, "ack_failed": 0, "commands": 0,
     }  # fmt: skip
     assert len(gmail.replies) == 1
 
