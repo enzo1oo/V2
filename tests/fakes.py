@@ -282,6 +282,7 @@ class FakeGmailClient:
         self.fail_labelling = False
         self.fail_reply = False
         self.auth_broken = False
+        self.stored: dict[str, list[Attachment]] = {}  # task ID -> files kept (GRC/Files)
 
     def add(self, message_id: str, labels: tuple[str, ...] = ("INBOX", "UNREAD"), **message: Any):
         values = {
@@ -349,6 +350,21 @@ class FakeGmailClient:
         self._check()
         self.sent.append((email, sender_name))
 
+    def store_files(self, task_id: str, attachments: list[Attachment]) -> None:
+        self._check()
+        self.stored.setdefault(task_id, []).extend(attachments)
+
+    def task_files(self, task_id: str, source_id: str = "") -> list[Attachment]:
+        self._check()
+        files: list[Attachment] = []
+        if source_id in self.messages:
+            files += list(self.messages[source_id]["message"].attachments)
+        for mid, item in self.messages.items():
+            message = item["message"]
+            if mid != source_id and task_id in message.subject:
+                files += list(message.attachments)
+        return [*files, *self.stored.get(task_id, [])]
+
 
 class FakeChatClient:
     """Chat attachment downloads from a dict of resource name -> bytes."""
@@ -383,10 +399,11 @@ class FakeWhatsApp:
         self.media = media or {}
         self.fail_send = False
 
-    def send_text(self, to: str, text: str) -> None:
+    def send_text(self, to: str, text: str) -> str | None:
         if self.fail_send:
             raise RuntimeError("send failed")
         self.texts.append((to, text))
+        return f"bot-{len(self.texts)}"
 
     def send_template(self, to: str, name: str, language: str, params: list[str]) -> None:
         if self.fail_send:

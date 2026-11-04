@@ -5,7 +5,7 @@ from __future__ import annotations
 from html import escape
 from typing import Protocol
 
-from app.models import OutgoingEmail, StaffMember, Task, TaskResult
+from app.models import Attachment, OutgoingEmail, StaffMember, Task, TaskResult
 from app.route import find_person
 
 DIVIDER = "-" * 60
@@ -22,6 +22,40 @@ class MissingEmail(Exception):
 
 def _date(task: Task) -> str:
     return f"{task.due_date:%d %b %Y}" if task.due_date else "no due date"
+
+
+MAX_EMAIL_FILES_BYTES = 20 * 1024 * 1024  # v1.4 decision F3: real attachments up to 20 MB
+
+
+def fit_files(files: list[Attachment]) -> tuple[list[Attachment], list[str]]:
+    """Attachments up to 20 MB in total, in order; the names of the rest (sent by name only)."""
+    kept: list[Attachment] = []
+    names: list[str] = []
+    total = 0
+    for attachment in files:
+        if total + attachment.size <= MAX_EMAIL_FILES_BYTES:
+            kept.append(attachment)
+            total += attachment.size
+        else:
+            names.append(attachment.filename)
+    return kept, names
+
+
+def with_files(email: OutgoingEmail, files: list[Attachment]) -> OutgoingEmail:
+    """`email` carrying `files` as attachments; past 20 MB the rest are named in the text."""
+    kept, too_big = fit_files(files)
+    if not too_big:
+        return email.model_copy(update={"attachments": kept})
+    note = "Too large to attach (kept in the GRC bot mailbox; ask the manager): " + ", ".join(
+        too_big
+    )
+    return email.model_copy(
+        update={
+            "attachments": kept,
+            "text": f"{email.text}\n\n{note}",
+            "html": f"{email.html}<p>{escape(note)}</p>",
+        }
+    )
 
 
 def assignment_subject(task: Task) -> str:

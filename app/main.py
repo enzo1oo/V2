@@ -13,7 +13,7 @@ import logging
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, FastAPI, Request
@@ -29,6 +29,7 @@ from app.extract.ai import provider_from_config
 from app.gmail import GmailAuthError, GmailClient, GoogleGmailClient, process_inbox
 from app.jobs import run_changes, run_digest, run_recurring
 from app.logs import setup_logging
+from app.models import REVIEW_COLUMNS
 from app.pipeline import Services
 from app.settings import Settings, get_settings, missing_settings
 from app.sheets import GoogleSheetsBackend, SchemaError, SheetStore
@@ -56,6 +57,7 @@ class Health:
     missing: list[str]
     sheet: list[str]
     checked_at: float
+    warnings: list[str] = field(default_factory=list)  # reported, but /health stays 200
 
     @property
     def ok(self) -> bool:
@@ -77,6 +79,7 @@ def check_startup(
     Never raises: a broken setup must still boot so /health can say what is wrong."""
     missing = missing_settings(settings)
     sheet: list[str] = []
+    warnings: list[str] = []
     if "SHEET_ID" not in missing:
         try:
             store = store_factory(settings)
@@ -90,6 +93,7 @@ def check_startup(
                 missing.append("SHARED_DRIVE_FOLDER_ID")
             if settings.wa_enabled:
                 store.wa_pending()
+            warnings = uncovered_divisions(store) + missing_review_columns(store)
         except SchemaError as error:
             sheet = list(error.problems)
         except Exception as error:  # unreachable, not shared with the runtime account, ...
@@ -98,7 +102,27 @@ def check_startup(
         logger.error("startup_missing_setting", extra={"reason": name})
     for problem in sheet:
         logger.error("startup_sheet_problem", extra={"reason": problem})
-    return Health(missing, sheet, time.monotonic())
+    for warning in warnings:
+        logger.warning("startup_warning", extra={"reason": warning})
+    return Health(missing, sheet, time.monotonic(), warnings)
+
+
+def missing_review_columns(store: SheetStore) -> list[str]:
+    """The v1.4 Master columns the sheet lacks (optional, but review commands need them)."""
+    header = store.master_header()
+    missing = [column for column in REVIEW_COLUMNS if column not in header]
+    return [f"Master is missing column(s): {', '.join(missing)}"] if missing else []
+
+
+def uncovered_divisions(store: SheetStore) -> list[str]:
+    """Divisions named in Catalog or LetterCodes that nobody in Staff covers (v1.4 R10): the
+    names must match exactly, or routing rule 3 finds nobody."""
+    covered = {d.casefold() for person in store.staff() for d in person.division_list}
+    named = {e.division.strip() for e in store.catalog() if e.division.strip()}
+    named |= {c.route_to_division.strip() for c in store.letter_codes() if c.route_to_division}
+    return [
+        f"nobody in Staff covers division {d}" for d in sorted(named) if d.casefold() not in covered
+    ]
 
 
 def current_health() -> Health | None:
@@ -149,7 +173,13 @@ class Runtime:
     def wa_context(self) -> WaContext | None:
         if self.wa is None or self.queue is None:
             return None
-        return WaContext(services=self.services(), wa=self.wa, queue=self.queue)
+        return WaContext(
+            services=self.services(),
+            wa=self.wa,
+            queue=self.queue,
+            gmail=self.gmail,
+            sheet_url=self.settings.sheet_url,
+        )
 
 
 _gmail_client: GmailClient | None = None
@@ -244,6 +274,8 @@ jobs = APIRouter(prefix="/jobs", dependencies=[Depends(require_scheduler)])
 def healthz() -> dict[str, str] | JSONResponse:
     health = current_health()
     if health is None or health.ok:
+        if health is not None and health.warnings:
+            return {"status": "ok", "warnings": health.warnings}
         return {"status": "ok"}
     content = {"status": "unhealthy", "missing": health.missing, "sheet": health.sheet}
     return JSONResponse(content, status_code=503)
@@ -253,7 +285,7 @@ def healthz() -> dict[str, str] | JSONResponse:
 def gmail_job(runtime: RuntimeDep) -> dict[str, object] | JSONResponse:
     try:
         runtime.store.load()
-        run = process_inbox(runtime.gmail, runtime.services())
+        run = process_inbox(runtime.gmail, runtime.services(), sheet_url=runtime.settings.sheet_url)
     except (SchemaError, GmailAuthError) as error:
         return _job_error("gmail", error, runtime)
     if run.gave_up:
