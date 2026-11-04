@@ -93,6 +93,9 @@ python scripts/smoke_gemini.py
 
 ## Deploy to Cloud Run
 
+**Installing in a new project (IT handover): follow [`docs/SETUP_GUIDE.md`](docs/SETUP_GUIDE.md)**,
+which walks through every step below in order, with the usual problems and their fixes.
+
 Everything runs from Cloud Shell (or any machine with `gcloud`), in the repo folder, with the
 project selected (`gcloud config set project YOUR-PROJECT-ID`). Names (service `v2-git`, region
 `asia-southeast2`, accounts `grc-tracker-run` and `grc-tracker-scheduler`) live in
@@ -108,10 +111,11 @@ deploy/setup_gcp.sh
 ```bash
 deploy/setup_secrets.sh
 ```
-3. **Production settings.** Copy the example, fill in the values (none are secret), and store it
-   as the secret `grc-env-prod` that every deploy reads:
+3. **Production settings.** `deploy/make_env.sh` writes `deploy/env.prod.yaml` from the project
+   (it asks only for the Sheet ID; or copy `deploy/env.prod.yaml.example` and fill it in by hand).
+   None of it is secret. Store it as the secret `grc-env-prod` that every deploy reads:
 ```bash
-cp deploy/env.prod.yaml.example deploy/env.prod.yaml
+deploy/make_env.sh
 ```
 ```bash
 deploy/setup_secrets.sh env
