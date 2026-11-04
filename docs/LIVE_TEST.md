@@ -48,7 +48,22 @@ Send from a phone whose number is in the Staff `WhatsApp` column, to the bot's n
 | W3 | Reply `YES`. | "… confirmed"; the flag is gone; AuditLog `Deadline confirmed`. |
 | W4 | Forward another request, then within 30 s `PROMPT: Assign this to <a Staff first name>`. | The new row's Owner and Doer are that person; Routing note starts `Assigned by sender (WhatsApp PROMPT)`; Notes has the PROMPT. Status is still `Proposed`. |
 | W5 | Reply to the deadline question with a different date, e.g. `27/11/2026`. | "Updated G-…: due Fri 27 Nov 2026"; `Due date` changed; AuditLog `Deadline corrected`. |
-| W6 | Send a PDF letter with no text. | Logged 30 s later; title and deadline read from the PDF; `Files` reads `In the WhatsApp chat with the bot: <file>`. |
+| W6 | Send a PDF letter with no text. | Logged 30 s later; title and deadline read from the PDF; `Files` reads `In the GRC bot mailbox: <file>`. |
 | W7 | From a number not in Staff, send anything. | One reply: "This number isn't registered …"; no row. |
 | W8 | Weekday, after Config `Reminder time`, someone with a `WhatsApp` number has a task due this week. | Within 30 minutes they get the `grc_daily_reminder` template; only once that day. |
+
+## Roles, review and commands (DESIGN section 19)
+
+Set up Staff roles first (README §1b). Use a test task that is approved (`Not Started`).
+
+| # | Do this | Expected |
+|---|---------|----------|
+| C1 | As the task's Owner (a full-timer with an intern), reply to the bot's message about the task with `assign that to <intern first name>`. | "G-… is now with <intern>". The intern gets the assignment email with the files; Doer changed, Owner unchanged; AuditLog `Delegated`, reason `Command via WhatsApp`. |
+| C2 | As someone else, `assign G-… to <intern>`. | Refused ("does not report to you"); nothing changes. |
+| C3 | As the intern, send a PDF captioned `review G-…`. | Status `In Review`, `Review file` names the PDF; the supervisor gets an email with the PDF and `approve` / `return` lines. |
+| C4 | As the supervisor, reply to that email with `return G-… fix table 3`. | Status `Returned`, `Review notes` set; the intern gets an email with the notes. |
+| C5 | Intern sends `review G-…` again; supervisor replies `approve`. Intern sends the proof captioned `done G-…`. | `Approved`, then `Done` with `Link` = "In the GRC bot mailbox: <proof>" and `Submitted date` today. |
+| C6 | In the Sheet, a non-reviewer sets Status to `Approved`. | Undone; AuditLog `Blocked`. |
+| C7 | `files G-…` on WhatsApp. | Reply lists the files; they arrive by email. |
+| C8 | Manager: `pause <name>`, then assign them a task. | No email until `resume <name>`. |
 

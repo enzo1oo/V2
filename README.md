@@ -182,6 +182,26 @@ one alert. Against `GRC_Tracker_Tabs_v2.xlsx` that means:
       `=OR(V2<>"Done",AND(Q2<>"",X2<>""))` (adjust letters to Status/Submitted date/Link) as a
       second guard next to the Apps Script check.
 
+### 1b. Roles, review and commands (DESIGN section 19)
+- [ ] Master: add at the right `Needs review`, `Reviewer`, `Review notes`, `Reminder profile`,
+      `Review file`. Until they exist everything else keeps working, `/health` lists them as a
+      warning, and review commands reply which column to add.
+- [ ] Staff: add `Title`, `Department`, `Divisions`, `Reports to`, `Reminders paused` (and later
+      `Reminder channel`, `WhatsApp opt-in`). One row per person:
+      - `Role`: `Manager`, `Full time`, `Intern` or `Additional help` (never proposed by routing).
+      - `Divisions`: every division the person covers, separated by `;`, spelled exactly as in
+        Catalog `Division` and LetterCodes `Route to division` (`/health` warns otherwise).
+      - `Reports to`: an intern's supervisor. Under a full-time person the intern is the Doer and
+        the supervisor the Owner and reviewer; under the Manager the intern owns the work.
+- [ ] Apps Script: paste the new `apps_script/audit.gs`, run `installAuditTrigger()` again and
+      `installValidation()` once (dropdowns for Status, Needs review, Reminder profile).
+- [ ] Tell the team the commands (WhatsApp to the bot, or the first line of a reply to a task
+      email): `progress G-0012 50`, `review G-0012` + file, `done G-0012` + proof,
+      `files G-0012`, `tugas` / `hari ini` / `minggu ini`, `approve G-0012`,
+      `return G-0012 <notes>`, `assign G-0012 to <name>` (or reply `assign that to <name>`);
+      manager: `semua`, `pause <name>`, `resume <name>`. Files are kept in the bot mailbox
+      (label `GRC/Files`); there is no Drive.
+
 ### 2. Google Cloud project and APIs
 - [ ] Done by `deploy/setup_gcp.sh` (APIs, Artifact Registry `cloud-run-source-deploy`, Cloud Tasks
       queue `wa-process`). For `AI provider = Vertex` also enable `aiplatform.googleapis.com`.
