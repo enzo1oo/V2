@@ -156,7 +156,7 @@ def test_bad_value_is_a_schema_error():
     staff[1][staff[0].index("Role")] = "Boss"
     store = FakeSheetStore(backend)
     store.load()
-    with pytest.raises(SchemaError, match="Staff: bad value in column"):
+    with pytest.raises(SchemaError, match=r"Staff: bad value in row 2, column\(s\) Role"):
         store.staff()
 
 

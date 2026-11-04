@@ -33,6 +33,23 @@ def test_staff_from_sheet_row_with_blanks():
     assert staff.weighted_open_load == 0.0
 
 
+@pytest.mark.parametrize("typed", ["31/12/2026", "31-12-2026", "31 Dec 2026", "31 December 2026"])
+def test_staff_internship_end_typed_as_text(typed):
+    staff = StaffMember.model_validate({"Name": "C", "Internship end date": typed})
+    assert staff.internship_end == date(2026, 12, 31)
+
+
+def test_staff_internship_end_that_is_not_a_date_is_refused():
+    with pytest.raises(ValidationError):
+        StaffMember.model_validate({"Name": "C", "Internship end date": "end of year"})
+
+
+@pytest.mark.parametrize("value", ["Yes", "No", 46022, ""])
+def test_staff_whatsapp_opt_in_is_free_text(value):
+    staff = StaffMember.model_validate({"Name": "D", "WhatsApp opt-in": value})
+    assert isinstance(staff.whatsapp_opt_in, str)
+
+
 def test_staff_zero_capacity_treated_as_full_time():
     staff = StaffMember.model_validate({"Name": "B", "Capacity (1 = full time)": 0})
     assert staff.capacity == 1.0

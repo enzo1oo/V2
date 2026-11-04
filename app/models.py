@@ -47,6 +47,25 @@ def _blank_to_none(value: object) -> object:
     return value
 
 
+_TEXT_DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%d %b %Y", "%d %B %Y")
+
+
+def _text_date(value: object) -> object:
+    """A date typed as text (e.g. `31/12/2026`, `31 Dec 2026`) instead of a real date cell.
+    Day first, as written in Hong Kong and Indonesia. Anything else is left for pydantic to
+    refuse."""
+    value = _blank_to_none(value)
+    if not isinstance(value, str):
+        return value
+    text = " ".join(value.split())
+    for fmt in _TEXT_DATE_FORMATS:
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return value
+
+
 class _SheetRow(BaseModel):
     """A row read from a tab. Blank cells arrive as "" and numbers in text columns become text."""
 
@@ -123,10 +142,11 @@ class StaffMember(_SheetRow):
     divisions: str = Field(default="", alias="Divisions")  # ";"-separated; blank = Main division
     reports_to: str = Field(default="", alias="Reports to")
     reminder_channel: str = Field(default="", alias="Reminder channel")
-    whatsapp_opt_in: date | None = Field(default=None, alias="WhatsApp opt-in")
+    # Free text (e.g. `Yes`, or the date consent was given); for the reminder engine (v1.4 part 2).
+    whatsapp_opt_in: str = Field(default="", alias="WhatsApp opt-in")
     reminders_paused: str = Field(default="", alias="Reminders paused")
 
-    _blanks = field_validator("internship_end", "whatsapp_opt_in", mode="before")(_blank_to_none)
+    _dates = field_validator("internship_end", mode="before")(_text_date)
 
     @property
     def division_list(self) -> list[str]:
