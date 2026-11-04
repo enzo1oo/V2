@@ -278,15 +278,18 @@ class TabData:
 
 
 def _parse[Model: BaseModel](
-    model: type[Model], tab: TabData, records: Iterable[dict[str, Any]]
+    model: type[Model], tab: TabData, records: Iterable[tuple[int, dict[str, Any]]]
 ) -> list[Model]:
+    """Rows -> models. A bad cell names its tab, row number and column (never the value)."""
     parsed = []
-    for record in records:
+    for row, record in records:
         try:
             parsed.append(model.model_validate(record))
         except ValidationError as error:
             fields = sorted({str(problem["loc"][0]) for problem in error.errors()})
-            raise SchemaError([f"{tab.name}: bad value in column(s) {', '.join(fields)}"]) from None
+            raise SchemaError(
+                [f"{tab.name}: bad value in row {row}, column(s) {', '.join(fields)}"]
+            ) from None
     return parsed
 
 
@@ -379,23 +382,23 @@ class SheetStore:
     def staff(self) -> list[StaffMember]:
         if self._staff is None:
             tab = self._tab("Staff")
-            records = (r for _, r in tab.records() if str(r.get("Name", "")).strip())
+            records = ((n, r) for n, r in tab.records() if str(r.get("Name", "")).strip())
             self._staff = _parse(StaffMember, tab, records)
         return self._staff
 
     def catalog(self) -> list[CatalogEntry]:
         tab = self._tab("Catalog")
-        records = (r for _, r in tab.records() if str(r.get("Catalog ID", "")).strip())
+        records = ((n, r) for n, r in tab.records() if str(r.get("Catalog ID", "")).strip())
         return _parse(CatalogEntry, tab, records)
 
     def letter_codes(self) -> list[LetterCode]:
         tab = self._tab("LetterCodes")
-        records = (r for _, r in tab.records() if str(r.get("Letter code", "")).strip())
+        records = ((n, r) for n, r in tab.records() if str(r.get("Letter code", "")).strip())
         return _parse(LetterCode, tab, records)
 
     def tasks(self) -> list[Task]:
         tab = self._tab(MASTER)
-        records = (r for _, r in tab.records() if str(r.get("ID", "")).strip())
+        records = ((n, r) for n, r in tab.records() if str(r.get("ID", "")).strip())
         return _parse(Task, tab, records)
 
     def master_header(self) -> list[str]:
@@ -406,12 +409,12 @@ class SheetStore:
 
     def state(self) -> dict[str, StateRow]:
         tab = self._tab("_state")
-        records = (r for _, r in tab.records() if str(r.get("ID", "")).strip())
+        records = ((n, r) for n, r in tab.records() if str(r.get("ID", "")).strip())
         return {row.id: row for row in _parse(StateRow, tab, records)}
 
     def failures(self) -> dict[str, FailureRow]:
         tab = self._tab("_failures")
-        records = (r for _, r in tab.records() if str(r.get("Key", "")).strip())
+        records = ((n, r) for n, r in tab.records() if str(r.get("Key", "")).strip())
         return {row.key: row for row in _parse(FailureRow, tab, records)}
 
     # Writing ---------------------------------------------------------------------------------
@@ -583,7 +586,7 @@ class SheetStore:
 
     def wa_pending(self) -> list[WaPending]:
         tab = self._fresh_wa_pending()
-        records = (r for _, r in tab.records() if str(r.get("Key", "")).strip())
+        records = ((n, r) for n, r in tab.records() if str(r.get("Key", "")).strip())
         return _parse(WaPending, tab, records)
 
     def edit_wa_pending[Result](self, edit: Callable[[list[WaPending]], Result]) -> Result:
@@ -591,7 +594,7 @@ class SheetStore:
         write lock, so two messages from one sender never both open a draft."""
         with self._lock:
             tab = self._fresh_wa_pending()
-            records = (r for _, r in tab.records() if str(r.get("Key", "")).strip())
+            records = ((n, r) for n, r in tab.records() if str(r.get("Key", "")).strip())
             rows = _parse(WaPending, tab, records)
             result = edit(rows)
             self._tabs[WA_PENDING] = tab

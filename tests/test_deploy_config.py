@@ -13,7 +13,8 @@ from app.settings import REQUIRED, WHATSAPP, Settings
 
 ROOT = Path(__file__).resolve().parents[1]
 LAPTOP_ONLY = {"OAUTH_CLIENT_FILE"}  # a path on a laptop; production uses OAUTH_CLIENT_SECRET
-PLATFORM = {"GOOGLE_CLOUD_PROJECT"}  # set by Cloud Shell itself; scripts/live_check.py reads it
+# Set by Cloud Shell itself: live_check.py reads the project, mint_gmail_token.py detects the shell.
+PLATFORM = {"GOOGLE_CLOUD_PROJECT", "CLOUD_SHELL"}
 _ENV_READ = re.compile(
     r"""(?:os\.environ\.get|os\.getenv|os\.environ\.setdefault)\(\s*["']([A-Z][A-Z0-9_]*)["']"""
     r"""|os\.environ\[\s*["']([A-Z][A-Z0-9_]*)["']\s*\]"""
