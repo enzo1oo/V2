@@ -250,6 +250,17 @@ deploy/setup_secrets.sh GMAIL_REFRESH_TOKEN
 ```
 (It checks nothing about the value: paste only the line starting with `1//`. The mint script
 prints which mailbox the token belongs to; it must be the bot.)
+
+**From Cloud Shell instead of a laptop** (as your own account, in the repo folder): the script
+prints a link. Open it in a private window, sign in as the bot and allow; the page then fails to
+load ("localhost refused to connect"), which is expected. Copy the whole address bar and paste it
+back. The client JSON is read from Secret Manager, so no file is needed:
+```bash
+pip install --user google-auth-oauthlib
+```
+```bash
+python scripts/mint_gmail_token.py <(gcloud secrets versions access latest --secret=grc-gmail-oauth-client)
+```
 - [ ] Fill Config `Allowed senders`. No labels need to be created: `GRC/Logged`, `GRC/Ignored`,
       `GRC/Reply` and `GRC/Failed` are created by the service.
 - [ ] Tell the team: forward or send requests to the bot address; the sender gets a reply in the
