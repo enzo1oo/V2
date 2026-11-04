@@ -92,7 +92,8 @@ def missing_settings(settings: Settings) -> list[str]:
     missing = [name for name in REQUIRED if not _value(settings, name).strip()]
     if "OAUTH_CLIENT_SECRET" in missing and settings.oauth_client_file.strip():
         missing.remove("OAUTH_CLIENT_SECRET")
-    if any(_value(settings, name).strip() for name in WHATSAPP):
+    # RUNTIME_SA_EMAIL is filled for every deploy, so only a WA_* value means WhatsApp is wanted.
+    if any(_value(settings, name).strip() for name in WHATSAPP if name.startswith("WA_")):
         missing += [name for name in WHATSAPP if not _value(settings, name).strip()]
     return missing
 

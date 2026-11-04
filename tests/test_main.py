@@ -140,6 +140,10 @@ def test_startup_check_whatsapp_is_all_or_nothing():
 
     store = lambda s: FakeSheetStore(FakeSheetsBackend.from_fixtures())  # noqa: E731
     assert main_module.check_startup(Settings(**FULL), store).ok
+    # Every deploy fills RUNTIME_SA_EMAIL and the queue name; that alone is not "WhatsApp on".
+    deployed = Settings(**FULL, runtime_sa_email="run@proj", wa_tasks_queue="wa-process")
+    assert main_module.check_startup(deployed, store).ok
+    assert not deployed.wa_enabled
     partly = Settings(**FULL, wa_phone_number_id="PNID")
     assert "WA_ACCESS_TOKEN" in main_module.check_startup(partly, store).missing
 
