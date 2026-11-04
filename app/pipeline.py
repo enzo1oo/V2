@@ -83,8 +83,8 @@ def _files_note(raw: RawRequest) -> str:
     names = ", ".join(attachment.filename for attachment in raw.attachments)
     if raw.source == "Email":
         return f"In the original email in the GRC bot mailbox: {names}"
-    if raw.source == "WhatsApp":
-        return f"In the WhatsApp chat with the bot: {names}"
+    if raw.source == "WhatsApp":  # v1.4 decision F2: downloaded and kept in the bot mailbox
+        return f"In the GRC bot mailbox: {names}"
     return f"Not stored: {names}"
 
 
@@ -249,7 +249,7 @@ def process_request(raw: RawRequest, services: Services, today: date | None = No
         division=routed.division or "",
         requester=requester or "",
         owner=routed.owner or "",
-        doer=routed.owner or "",
+        doer=routed.doer or routed.owner or "",
         letter_no=letter.letter_no if letter else "",
         letter_code=letter.letter_code if letter else "",
         start=raw.received_at.astimezone(clock.TZ).date(),
