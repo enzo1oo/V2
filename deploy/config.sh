@@ -8,6 +8,8 @@ RUNTIME_SA_NAME="grc-tracker-run"        # the service runs as this account
 SCHEDULER_SA_NAME="grc-tracker-scheduler"
 REPO="cloud-run-source-deploy"           # Artifact Registry repository (Docker)
 QUEUE="wa-process"                       # Cloud Tasks queue of the WhatsApp bot
+GMAIL_TOPIC="grc-gmail-push"             # Pub/Sub topic: Gmail's new-mail notes (instant email)
+GMAIL_SUBSCRIPTION="grc-gmail-push"      # push subscription that calls /jobs/gmail-push
 ENV_SECRET="grc-env-prod"                # deploy/env.prod.yaml, stored whole as one secret
 
 RUNTIME_SA="${RUNTIME_SA_NAME}@${PROJECT}.iam.gserviceaccount.com"

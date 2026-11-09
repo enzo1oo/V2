@@ -160,6 +160,7 @@ def test_make_env_fills_everything_but_the_sheet_from_the_project(tmp_path):
         'SCHEDULER_SA_EMAIL: "grc-tracker-scheduler@proj-x.iam.gserviceaccount.com"',
         'RUNTIME_SA_EMAIL: "grc-tracker-run@proj-x.iam.gserviceaccount.com"',
         'CHAT_PROJECT_NUMBER: "123456789"',
+        'GMAIL_PUSH_TOPIC: "projects/proj-x/topics/grc-gmail-push"',
         'WA_PHONE_NUMBER_ID: ""',
     ):
         assert line in text
@@ -170,3 +171,16 @@ def test_make_env_refuses_something_that_is_not_a_sheet_id(tmp_path):
     result = _run_make_env(tmp_path, "<SHEET_ID>\n")
     assert result.returncode == 1
     assert not (tmp_path / "deploy" / "env.prod.yaml").exists()
+
+
+def test_instant_email_is_wired_end_to_end():
+    """Topic (setup_gcp) -> subscription to /jobs/gmail-push and a daily watch (setup_scheduler),
+    under the names in config.sh, signed as the scheduler account the app checks."""
+    config = (ROOT / "deploy" / "config.sh").read_text(encoding="utf-8")
+    gcp = (ROOT / "deploy" / "setup_gcp.sh").read_text(encoding="utf-8")
+    scheduler = (ROOT / "deploy" / "setup_scheduler.sh").read_text(encoding="utf-8")
+    assert 'GMAIL_TOPIC="grc-gmail-push"' in config
+    assert "pubsub.googleapis.com" in gcp and "gmail-api-push@system.gserviceaccount.com" in gcp
+    assert "grc-gmail-watch|23 6 * * *|/jobs/gmail-watch" in scheduler
+    assert '--push-endpoint "$url/jobs/gmail-push"' in scheduler
+    assert '--push-auth-service-account "$SCHEDULER_SA"' in scheduler

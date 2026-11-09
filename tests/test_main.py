@@ -186,3 +186,92 @@ def test_sheet_problems_are_rechecked_without_a_redeploy(monkeypatch):
     fixed = main_module.Health(missing=[], sheet=[], checked_at=0.0)
     monkeypatch.setattr(main_module, "check_startup", lambda settings: fixed)
     assert TestClient(app).get("/health").status_code == 200
+
+
+# --- instant email: Gmail push via Pub/Sub (DESIGN section 20) --------------------------------
+
+
+def test_gmail_push_answers_at_once_then_reads_the_inbox(fixture_text):
+    gmail = FakeGmailClient()
+    gmail.add("m1", body_text=fixture_text("manpower_planning.txt"))
+    rt = runtime(gmail)
+    push = {"message": {"data": "eyJlbWFpbEFkZHJlc3MiOiAiYm90QGV4YW1wbGUuY29tIn0="}}
+    response = client_with(rt).post("/jobs/gmail-push", json=push)
+    assert response.status_code == 204
+    # TestClient runs the background work before returning: the request is logged.
+    assert len(gmail.replies) == 1
+    assert "G-0001" in [t.id for t in rt.store.tasks()]
+
+
+def test_gmail_push_with_nothing_new_does_not_read_the_sheet():
+    backend = FakeSheetsBackend.from_fixtures()
+    rt = runtime(backend=backend)
+    assert client_with(rt).post("/jobs/gmail-push", json={}).status_code == 204
+    assert backend.calls == []  # no Sheets call at all
+
+
+def test_gmail_push_failure_is_logged_and_never_resent(caplog):
+    gmail = FakeGmailClient()
+    gmail.add("m1", body_text="x")
+    gmail.auth_broken = True
+    with caplog.at_level(logging.ERROR, logger="grc"):
+        response = client_with(runtime(gmail)).post("/jobs/gmail-push", json={})
+    assert response.status_code == 204  # Pub/Sub must not resend: the mail stays unread
+    assert any(r.getMessage() == "gmail_auth_error" for r in caplog.records)
+
+
+def test_gmail_watch_renews_the_push():
+    gmail = FakeGmailClient()
+    rt = runtime(gmail)
+    rt.settings = Settings(sheet_id="sheet-1", gmail_push_topic="projects/p/topics/grc-gmail-push")
+    body = client_with(rt).post("/jobs/gmail-watch").json()
+    assert body == {"job": "gmail-watch", "expires": "2026-11-16T09:00:00+08:00"}
+    assert gmail.watched == ["projects/p/topics/grc-gmail-push"]
+
+
+def test_gmail_watch_without_a_topic_is_skipped():
+    body = client_with(runtime()).post("/jobs/gmail-watch").json()
+    assert body == {"job": "gmail-watch", "skipped": "GMAIL_PUSH_TOPIC not set"}
+
+
+def test_gmail_watch_refused_by_google_is_500(caplog):
+    class Refused(Exception):
+        class resp:  # mimics googleapiclient's HttpError.resp
+            status = 403
+
+    gmail = FakeGmailClient()
+    gmail.watch = lambda topic: (_ for _ in ()).throw(Refused())
+    rt = runtime(gmail)
+    rt.settings = Settings(sheet_id="sheet-1", gmail_push_topic="projects/p/topics/t")
+    with caplog.at_level(logging.ERROR, logger="grc"):
+        response = client_with(rt).post("/jobs/gmail-watch")
+    assert response.status_code == 500
+    [record] = [r for r in caplog.records if r.getMessage() == "gmail_watch_failed"]
+    assert record.status == 403
+
+
+def test_inbox_runs_never_overlap_and_a_late_push_runs_again():
+    import threading
+
+    from app.gmail import OneRunAtATime
+
+    gate = OneRunAtATime()
+    started, release = threading.Event(), threading.Event()
+    calls = []
+
+    def slow():
+        calls.append("run")
+        if len(calls) == 1:
+            started.set()
+            release.wait(5)
+        return len(calls)
+
+    worker = threading.Thread(target=lambda: calls.append(("first", gate.run(slow))))
+    worker.start()
+    started.wait(5)
+    assert gate.run(lambda: "second") is None  # in progress: no second run at the same time
+    release.set()
+    worker.join(5)
+    # The first caller went round once more for the mail that arrived during its run.
+    assert calls == ["run", "run", ("first", 2)]
+    assert gate.run(lambda: "free") == "free"

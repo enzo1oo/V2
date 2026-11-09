@@ -16,9 +16,9 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from pydantic import ValidationError
 
 from app import clock
@@ -27,7 +27,7 @@ from app.auth import require_chat, require_scheduler, require_task
 from app.chat import ChatClient, GoogleChatClient, handle_event
 from app.drive import DriveStore, GoogleDriveStore, NoFileStorage
 from app.extract.ai import provider_from_config
-from app.gmail import GmailAuthError, GmailClient, GoogleGmailClient, process_inbox
+from app.gmail import INBOX_RUNS, GmailAuthError, GmailClient, GoogleGmailClient, process_inbox
 from app.jobs import recurring_problems, run_changes, run_digest, run_recurring
 from app.logs import setup_logging
 from app.models import REVIEW_COLUMNS
@@ -296,17 +296,68 @@ def healthz() -> dict[str, str] | JSONResponse:
     return JSONResponse(content, status_code=503)
 
 
-@jobs.post("/gmail", response_model=None)
-def gmail_job(runtime: RuntimeDep) -> dict[str, object] | JSONResponse:
+def _gmail_run(
+    runtime: Runtime, job: str, only_if_unread: bool = False
+) -> dict[str, object] | JSONResponse:
     try:
+        if only_if_unread and not runtime.gmail.unread_inbox(1):
+            # Most pushes are the bot's own label changes: no sheet read when nothing is new.
+            return {"job": job, "messages": 0}
         runtime.store.load()
         run = process_inbox(runtime.gmail, runtime.services(), sheet_url=runtime.settings.sheet_url)
     except (SchemaError, GmailAuthError) as error:
-        return _job_error("gmail", error, runtime)
+        return _job_error(job, error, runtime)
     if run.gave_up:
         details = [f"{run.gave_up} request(s) moved to GRC/Failed in this run"]
         send_alert("request_gave_up", details, runtime.gmail, runtime.store)
-    return {"job": "gmail", **run.model_dump()}
+    return {"job": job, **run.model_dump()}
+
+
+@jobs.post("/gmail", response_model=None)
+def gmail_job(runtime: RuntimeDep) -> dict[str, object] | JSONResponse:
+    result = INBOX_RUNS.run(lambda: _gmail_run(runtime, "gmail"))
+    if result is None:
+        return {"job": "gmail", "skipped": "a run is in progress; it will read the inbox again"}
+    return result
+
+
+def _push_run(runtime: Runtime) -> None:
+    try:
+        INBOX_RUNS.run(lambda: _gmail_run(runtime, "gmail-push", only_if_unread=True))
+    except Exception as error:  # nothing is lost: the mail stays unread for the 10-minute job
+        logger.error("gmail_push_failed", extra={"error_type": type(error).__name__})
+
+
+@jobs.post("/gmail-push", status_code=204, response_model=None)
+def gmail_push(runtime: RuntimeDep, background: BackgroundTasks) -> Response:
+    """Pub/Sub push: Gmail says the Inbox changed (DESIGN section 20). Answered at once, so
+    Pub/Sub does not resend; the inbox is read right after the answer. The note itself (the
+    mailbox address and a history number) is not needed and not read."""
+    background.add_task(_push_run, runtime)
+    return Response(status_code=204)
+
+
+@jobs.post("/gmail-watch", response_model=None)
+def gmail_watch_job(runtime: RuntimeDep) -> dict[str, object] | JSONResponse:
+    """Daily: renew Gmail's push to the topic (it lapses after 7 days)."""
+    topic = runtime.settings.gmail_push_topic.strip()
+    if not topic:
+        return {"job": "gmail-watch", "skipped": "GMAIL_PUSH_TOPIC not set"}
+    try:
+        expires = runtime.gmail.watch(topic)
+    except GmailAuthError as error:
+        return _job_error("gmail-watch", error, runtime)
+    except Exception as error:  # topic missing, or Gmail may not publish to it (org policy)
+        status = getattr(getattr(error, "resp", None), "status", 0)
+        logger.error(
+            "gmail_watch_failed", extra={"error_type": type(error).__name__, "status": status}
+        )
+        return JSONResponse(
+            status_code=500, content={"job": "gmail-watch", "error": type(error).__name__}
+        )
+    until = expires.isoformat() if expires else ""
+    logger.info("gmail_watch", extra={"reason": until})
+    return {"job": "gmail-watch", "expires": until}
 
 
 @jobs.post("/changes", response_model=None)

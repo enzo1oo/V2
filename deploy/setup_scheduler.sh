@@ -27,6 +27,7 @@ jobs=(
   "grc-digest|0 9 * * 1-5|/jobs/digest"
   "grc-wa-reminders|*/30 7-19 * * 1-5|/jobs/wa-reminders"
   "grc-wa-drafts|*/10 * * * *|/jobs/wa-drafts"
+  "grc-gmail-watch|23 6 * * *|/jobs/gmail-watch"
 )
 for job in "${jobs[@]}"; do
   IFS='|' read -r name schedule path <<<"$job"
@@ -46,3 +47,32 @@ for job in "${jobs[@]}"; do
     echo "created $name ($schedule)"
   fi
 done
+
+# Instant email (DESIGN section 20): Gmail -> topic -> this push subscription -> /jobs/gmail-push,
+# with an OIDC token of the scheduler account (the app checks it like a Scheduler call).
+topic="$(yaml_value GMAIL_PUSH_TOPIC "$env_file")"
+if [ -z "$topic" ]; then
+  echo "GMAIL_PUSH_TOPIC is empty: instant email is off; the 10-minute run reads the inbox."
+  exit 0
+fi
+number="$(gcloud projects describe "$PROJECT" --format='value(projectNumber)')"
+# Projects made before April 2021: Pub/Sub must be allowed to sign tokens as that account.
+gcloud iam service-accounts add-iam-policy-binding "$SCHEDULER_SA" --project "$PROJECT" \
+  --member "serviceAccount:service-$number@gcp-sa-pubsub.iam.gserviceaccount.com" \
+  --role roles/iam.serviceAccountTokenCreator >/dev/null 2>&1 || true
+push=(
+  --project "$PROJECT" --push-endpoint "$url/jobs/gmail-push"
+  --push-auth-service-account "$SCHEDULER_SA" --push-auth-token-audience "$url"
+  --ack-deadline 60 --message-retention-duration 1h --expiration-period never
+)
+if gcloud pubsub subscriptions describe "$GMAIL_SUBSCRIPTION" --project "$PROJECT" \
+  >/dev/null 2>&1; then
+  gcloud pubsub subscriptions update "$GMAIL_SUBSCRIPTION" "${push[@]}" >/dev/null
+  echo "updated push subscription $GMAIL_SUBSCRIPTION"
+else
+  gcloud pubsub subscriptions create "$GMAIL_SUBSCRIPTION" --topic "$topic" "${push[@]}" >/dev/null
+  echo "created push subscription $GMAIL_SUBSCRIPTION"
+fi
+# Start the push now instead of at tomorrow's renewal.
+gcloud scheduler jobs run grc-gmail-watch --project "$PROJECT" --location "$REGION"
+echo "Gmail push started. Check the log for gmail_watch (working) or gmail_watch_failed."
