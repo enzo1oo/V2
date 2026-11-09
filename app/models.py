@@ -228,6 +228,44 @@ class LetterCode(_SheetRow):
     route_to_division: str = Field(alias="Route to division")
 
 
+class RecurringRule(_SheetRow):
+    """One row of the optional `Recurring` tab (v1.4 part 3, DESIGN section 20): a task that is
+    created again every period, already approved, with a fixed Owner and Doer."""
+
+    name: str = Field(alias="Name")
+    active: str = Field(default="", alias="Active")
+    title: str = Field(alias="Title")
+    repeat: str = Field(alias="Repeat")
+    first_due: date | None = Field(alias="First due date")
+    title_period: str = Field(default="", alias="Title period")
+    create_days_before: int | None = Field(default=None, alias="Create days before")
+    owner: str = Field(default="", alias="Owner")
+    doer: str = Field(alias="Doer")
+    needs_review: str = Field(default="", alias="Needs review")
+    reviewer: str = Field(default="", alias="Reviewer")
+    catalog_id: str = Field(default="", alias="Catalog ID")
+    notes: str = Field(default="", alias="Notes")
+
+    _date = field_validator("first_due", mode="before")(_text_date)
+
+    @field_validator("create_days_before", mode="before")
+    @classmethod
+    def _whole_days(cls, value: object) -> object:
+        value = _blank_to_none(value)
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        return value
+
+    @property
+    def is_active(self) -> bool:
+        """Blank counts as Yes: a row is there to be used; `No` pauses it."""
+        return self.active.strip().lower() not in {"no", "n", "false", "tidak"}
+
+
+# Columns a Recurring tab must have; the others are optional.
+RECURRING_REQUIRED_COLUMNS: tuple[str, ...] = ("Name", "Title", "Repeat", "First due date", "Doer")
+
+
 # --- Master ------------------------------------------------------------------------------------
 
 

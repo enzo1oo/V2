@@ -21,13 +21,14 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import ValidationError
 
+from app import clock
 from app.alerts import send_alert
 from app.auth import require_chat, require_scheduler, require_task
 from app.chat import ChatClient, GoogleChatClient, handle_event
 from app.drive import DriveStore, GoogleDriveStore, NoFileStorage
 from app.extract.ai import provider_from_config
 from app.gmail import GmailAuthError, GmailClient, GoogleGmailClient, process_inbox
-from app.jobs import run_changes, run_digest, run_recurring
+from app.jobs import recurring_problems, run_changes, run_digest, run_recurring
 from app.logs import setup_logging
 from app.models import REVIEW_COLUMNS
 from app.pipeline import Services
@@ -93,7 +94,11 @@ def check_startup(
                 missing.append("SHARED_DRIVE_FOLDER_ID")
             if settings.wa_enabled:
                 store.wa_pending()
-            warnings = uncovered_divisions(store) + missing_review_columns(store)
+            warnings = (
+                uncovered_divisions(store)
+                + missing_review_columns(store)
+                + recurring_warning(store)
+            )
         except SchemaError as error:
             sheet = list(error.problems)
         except Exception as error:  # unreachable, not shared with the runtime account, ...
@@ -105,6 +110,16 @@ def check_startup(
     for warning in warnings:
         logger.warning("startup_warning", extra={"reason": warning})
     return Health(missing, sheet, time.monotonic(), warnings)
+
+
+def recurring_warning(store: SheetStore) -> list[str]:
+    """How many Recurring rows cannot be used. A count only: /health is public and its warnings
+    are logged, and the details name people (the manager sees them in the digest and with the
+    `recurring` command)."""
+    count = len(recurring_problems(store, clock.today()))
+    if not count:
+        return []
+    return [f"Recurring: {count} row(s) cannot be used (details: manager digest or `recurring`)"]
 
 
 def missing_review_columns(store: SheetStore) -> list[str]:

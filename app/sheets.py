@@ -22,6 +22,7 @@ from pydantic import BaseModel, ValidationError
 
 from app import clock
 from app.models import (
+    RECURRING_REQUIRED_COLUMNS,
     REQUIRED_COLUMNS,
     REQUIRED_CONFIG_SETTINGS,
     WA_PENDING_COLUMNS,
@@ -30,6 +31,7 @@ from app.models import (
     CatalogEntry,
     FailureRow,
     LetterCode,
+    RecurringRule,
     StaffMember,
     StateRow,
     Task,
@@ -41,11 +43,14 @@ WRITE_LOCK = threading.RLock()
 MASTER = "Master"
 LOADED_TABS = ("Master", "Staff", "Catalog", "LetterCodes", "Config", "_state", "_failures")
 
-DATE_COLUMNS = frozenset({"Start / received", "Due date", "Submitted date", "Internship end date"})
+DATE_COLUMNS = frozenset(
+    {"Start / received", "Due date", "Submitted date", "Internship end date", "First due date"}
+)
 DATETIME_COLUMNS = frozenset(
     {"Last updated", "Notified at", "Timestamp", "Last at", "Created at", "Updated at"}
 )
 WA_PENDING = "_wa_pending"
+RECURRING = "Recurring"
 _SERIAL_EPOCH = datetime(1899, 12, 30)
 _ID_PATTERN = re.compile(r"^G-(\d+)$")
 
@@ -395,6 +400,31 @@ class SheetStore:
         tab = self._tab("LetterCodes")
         records = ((n, r) for n, r in tab.records() if str(r.get("Letter code", "")).strip())
         return _parse(LetterCode, tab, records)
+
+    def recurring(self) -> tuple[list[RecurringRule], list[str]]:
+        """The optional `Recurring` tab (v1.4 part 3), read fresh: (rules, problems).
+
+        No tab: nothing to create. A missing column stops the whole tab; a bad row is skipped
+        and named (tab, row and column, never the value), so one typo cannot hold up the rest.
+        """
+        if RECURRING not in set(self._backend.sheet_titles()):
+            return [], []
+        [values] = self._backend.get([quote_tab(RECURRING)])
+        tab = TabData.from_values(RECURRING, values)
+        missing = [column for column in RECURRING_REQUIRED_COLUMNS if column not in tab.header]
+        if missing:
+            return [], [f"{RECURRING} is missing column(s): {', '.join(missing)}"]
+        rules: list[RecurringRule] = []
+        problems: list[str] = []
+        for row, record in tab.records():
+            if not str(record.get("Name", "")).strip():
+                continue
+            try:
+                rules.append(RecurringRule.model_validate(record))
+            except ValidationError as error:
+                fields = sorted({str(problem["loc"][0]) for problem in error.errors()})
+                problems.append(f"{RECURRING} row {row}: bad value in {', '.join(fields)}")
+        return rules, problems
 
     def tasks(self) -> list[Task]:
         tab = self._tab(MASTER)
