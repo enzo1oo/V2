@@ -11,7 +11,8 @@ consent screens.
 
 ## What this service does
 
-People email requests to a **bot mailbox**. Every 10 minutes the service:
+People email requests to a **bot mailbox**. Within about a minute of each email (and every 10
+minutes as a backup) the service:
 
 1. reads the new, unread mail in the bot's Inbox;
 2. logs each request as a row in the **GRC Google Sheet** (tab `Master`), with an English title,
@@ -103,7 +104,8 @@ This takes a few minutes and is safe to run again. It:
   Sheets, Drive, Gmail, Chat, IAM);
 - creates the two service accounts with only the roles they need;
 - creates empty secrets;
-- creates the container repository and the Cloud Tasks queue.
+- creates the container repository and the Cloud Tasks queue;
+- creates the Pub/Sub topic `grc-gmail-push`, through which Gmail announces new mail.
 
 It ends with `Done. Next: deploy/setup_secrets.sh`.
 
@@ -249,6 +251,7 @@ The service uses the GRC team's existing sheet. You do not need a new one.
      `Additional help`) and `Divisions`. The division names must be **spelled exactly** as in the
      Catalog `Division` column. `Internship end date` is a real date or blank.
    - Hidden tabs `_state` and `_failures` exist (README section 1 has their headers).
+   - *Optional:* a `Recurring` tab for repeating tasks (README section 1c has its columns).
 
 ---
 
@@ -303,8 +306,21 @@ curl -s "$(gcloud run services describe v2-git --region=asia-southeast2 --format
 deploy/setup_scheduler.sh
 ```
 
-This creates or updates the six Cloud Scheduler jobs. The Gmail one runs **every 10 minutes**,
-which is why logging is not instant. To run it now instead of waiting:
+This creates or updates the Cloud Scheduler jobs, and the Pub/Sub push subscription that makes
+email **instant**: Gmail announces each new email and the service logs it within about a minute.
+The script ends by starting that push. Check it worked:
+
+```bash
+gcloud logging read 'resource.labels.service_name="v2-git" AND (jsonPayload.message="gmail_watch" OR jsonPayload.message="gmail_watch_failed")' --freshness=10m --limit=2 --format='table(timestamp, jsonPayload.message, jsonPayload.status)'
+```
+
+- `gmail_watch`: instant email is on.
+- `gmail_watch_failed` with status **403**, or step 2 printed `WARNING: Gmail may not publish`:
+  the organisation policy *Domain restricted sharing* blocks it. Ask for an exception for
+  `gmail-api-push@system.gserviceaccount.com`, then run `deploy/setup_gcp.sh` and
+  `deploy/setup_scheduler.sh` again. Until then nothing breaks: email is read every 10 minutes.
+
+The 10-minute Gmail job stays as a safety net. To run it now:
 
 ```bash
 gcloud scheduler jobs run grc-gmail --location=asia-southeast2
@@ -358,7 +374,8 @@ them.
 
 | Symptom or log line | Cause | Fix |
 |---|---|---|
-| Nothing happens for a few minutes | The Gmail job runs every 10 minutes | Run `gcloud scheduler jobs run grc-gmail --location=asia-southeast2` |
+| Nothing happens for a few minutes | Instant email is off or blocked, so the 10-minute job is the only reader | Check step 8 (`gmail_watch`); meanwhile run `gcloud scheduler jobs run grc-gmail --location=asia-southeast2` |
+| A Recurring row creates nothing | Not yet `Create days before` its deadline, `Active` = No, or the row has a problem | The manager sends `recurring` to the bot: it lists each row's next deadline and any problem. `/health` shows how many rows cannot be used. |
 | `gmail_run` with every count 0 | No unread mail in the bot's **Inbox** | The bot only takes unread mail in the Inbox. Mark it unread, or move it out of Spam. Check the mail actually arrived. |
 | `message_ignored` `sender_not_allowed` | Sender not allowed | Add the address or `@domain` to Config `Allowed senders`; mark the mail unread |
 | `message_ignored` `sent_by_bot_mailbox` | The test was sent from the bot itself | Send from a person's address |

@@ -69,8 +69,8 @@ Required columns (exact header text):
   `Returned`, `On Hold`, `Done`, `Cancelled`. **(v1.4)** New columns at the right: `Needs review`,
   `Reviewer`, `Review notes`, `Reminder profile`, `Review file` (section 19). They are optional:
   without them the service runs, `/health` warns, and a command that needs one names it.
-- `Source`: `Email`, `Google Chat`, **(v1.3)** `WhatsApp`, `Recurring <CatalogID> <yyyy-mm>`,
-  `Manual`.
+- `Source`: `Email`, `Google Chat`, **(v1.3)** `WhatsApp`, **(v1.4 part 3)**
+  `Recurring <Recurring row Name> <yyyy-mm-dd>` (section 20), `Manual`.
 - `Source ID`: Gmail message ID, Chat message name, or the recurring key. Used to skip duplicates.
 - `Weight`: write the same formula the existing rows use (looks up Effort in Config; blank = Medium).
 - `Link`: proof of submission (filled by people). `Files`: the Drive folder URL (filled by the service).
@@ -92,6 +92,11 @@ Rows with IDs starting `ADHOC-` have no default owner and are never used by rout
 
 ### LetterCodes
 `Letter code`, `Route to division`.
+
+### Recurring (optional) **(v1.4 part 3)**
+`Name`, `Active`, `Title`, `Repeat`, `First due date`, `Title period`, `Create days before`,
+`Owner`, `Doer`, `Needs review`, `Reviewer`, `Catalog ID`, `Notes`. `Name`, `Title`, `Repeat`,
+`First due date` and `Doer` are required columns; the tab itself is optional. Section 20.
 
 ### AuditLog (protected; service and Apps Script only)
 `Timestamp`, `User`, `Task ID`, `Action`, `Field`, `Old value`, `New value`, `Reason`.
@@ -245,8 +250,10 @@ or `NONE`), `language: "id" | "en" | "mixed"`.
 | Endpoint | Caller | Schedule (HKT) | What it does |
 |---|---|---|---|
 | `POST /jobs/gmail` | Scheduler | every 10 min | Up to 20 unread inbox messages: allowed sender → `process_request`; other sender → label `GRC/Ignored` |
+| `POST /jobs/gmail-push` **(v1.4)** | Pub/Sub push | on new mail | Answer 204 at once, then the same inbox run (section 20). Never overlaps another run |
+| `POST /jobs/gmail-watch` **(v1.4)** | Scheduler | daily 06:23 | Renew Gmail's push to the topic (it lapses after 7 days) |
 | `POST /jobs/changes` | Scheduler | every 5 min, 08:00–20:00 | Compare Master with `_state`; send assignment emails (section 8); update `_state` |
-| `POST /jobs/recurring` | Scheduler | daily 07:00 | Create confirmed Catalog reports due within `Recurring lead (days)`, once per period (`Source ID` = `Recurring <ID> <yyyy-mm>`) |
+| `POST /jobs/recurring` | Scheduler | daily 07:00 | **(v1.4 part 3)** Create each Recurring tab row's task once per deadline, `Create days before` it (section 20) |
 | `POST /jobs/digest` | Scheduler | weekdays 09:00 | Personal and manager digests |
 | `POST /chat` | Google Chat | on event | Section 8 |
 | `GET/POST /wa/webhook` **(v1.3)** | Meta | on event | Verification handshake; signed messages → Cloud Tasks queue `wa-process` (section 17) |
@@ -256,9 +263,9 @@ or `NONE`), `language: "id" | "en" | "mixed"`.
 | `GET /healthz` | anyone | — | 200 OK, no data |
 | `GET /health` **(v1.2)** | anyone | — | Same as `/healthz`; use this one on Cloud Run, which reserves some paths ending in "z" |
 
-Recurring rules: `Monthly` = every month; `Quarterly`/`Semester` = months listed in
-`Due months seen (2026)`, else Jan/Apr/Jul/Oct and Jan/Jul; `Annual` = first listed month. Due day =
-`Typical due day`, capped at the month's last day.
+Recurring rules: **(v1.4 part 3)** the Recurring tab (section 20) replaces the Catalog-based
+recurrence; Catalog `Recurrence`, `Typical due day`, `Due months seen (2026)` and `Confirmed by
+manager?` no longer create tasks (`Confirmed by manager?` still breaks routing ties).
 
 Change detection (`/jobs/changes`): an assignment email is sent when (a) Status moves from `Proposed`
 to any open status and the doer has not been notified for this task, or (b) `Doer` changes on an
@@ -598,7 +605,7 @@ WhatsApp Cloud API with a number and app that BRI registers in Meta Business Man
 
 ## 19. Roles, review lifecycle and commands (v1.4, part 1 of 3; approved 4 Nov 2026)
 
-Parts 2 (reminder engine, channels, WhatsApp templates) and 3 (Recurring tab) follow; until part 2,
+Part 2 (reminder engine, channels, WhatsApp templates) follows; part 3 is section 20. Until part 2,
 the event notices below go by email, and the daily digest and WhatsApp reminder stay as they are.
 
 **Roles and authority (R1–R11).** One Staff row per person; real names live only in the Sheet.
@@ -638,7 +645,7 @@ request. Indonesian and English synonyms.
 - `files G-0012` → the task's files: email attachments up to 20 MB in total (the rest by name);
   on WhatsApp the files go to the person's email.
 - `tugas` / `today` (`hari ini`) / `week` (`minggu ini`) → the person's open tasks (as Doer or
-  Owner); `semua` → all open tasks by Doer; `recurring` → part 3.
+  Owner); `semua` → all open tasks by Doer; `recurring` → the Recurring tab's rows (section 20).
 - `approve G-0012`, `return G-0012 <notes>` → reviewer or Manager only.
 - `pause <name>` / `resume <name>` → Staff `Reminders paused` = Yes / blank; paused people get no
   notices (assignment emails included; they wait until `resume`).
@@ -657,3 +664,51 @@ kept as a never-sent message labelled `GRC/Files`, subject `[GRC files] <task ID
 20 MB in total; WhatsApp sends no files in part 1. Small inline images (< 100 KB) in email replies
 are signatures, not proof.
 
+## 20. Recurring tab and instant email (v1.4 part 3; approved 9 Nov 2026)
+
+**Recurring tab (decisions D1–D3; carries accepted decisions 2, 13, 15, 16 and R9).** One row per
+repeating task (section 3). The daily `/jobs/recurring` (07:00):
+- **Deadlines.** The first is `First due date`; the next ones follow `Repeat` (`Weekly`,
+  `Monthly`, `Quarterly`, `Semester`, `Annual`; Indonesian words such as `Triwulan`, `Bulanan`
+  accepted) on the same day of the month, capped at a shorter month's last day. A first deadline
+  on a month's last day stays on month ends. **D2:** a deadline on a Saturday or Sunday is written
+  as the Friday before (no holiday list until part 2); the period key keeps the scheduled date.
+- **When.** Each deadline's task is created `Create days before` it (blank: Config `Recurring
+  lead (days)`), and never after the deadline has passed: a `First due date` in the past only
+  starts the series. A missed run catches up on the next day while the deadline is still ahead.
+- **Once.** `Source ID` = `Recurring <Name> <scheduled deadline yyyy-mm-dd>`, so a row is never
+  created twice for a deadline. Renaming a row starts a new series.
+- **The task.** `Title` with `{Q}` `{S}` `{M}` `{MMM}` `{YYYY}` filled in for the period:
+  `Title period` `Previous` (default) is the period before the deadline (a 15 Oct deadline is the
+  Q3 report), `Same` the deadline's own. Status **`Not Started`** (setting up the row is the
+  approval, decision 2), so the change job sends the Doer the assignment email on its next run.
+  Owner and Doer as written; a blank Owner follows the Doer's `Reports to` (R4/R5, R9). `Needs
+  review`, `Reviewer` and `Notes` are copied; `Catalog ID` fills `Division` and `Requester`
+  (otherwise `Division` is the Doer's first division). Routing and the AI are never used.
+- **Skipped rows (decision 15).** Unknown `Repeat`, an empty or unreadable `First due date`, an
+  empty `Title`, an empty Doer, an Owner or Doer not in Staff, or a blank Owner whose Doer reports
+  to nobody: the row is skipped, the others go on. The manager digest lists them under "Recurring
+  rows skipped", the Manager command `recurring` lists every row with its next deadline and the
+  problems, and `/health` shows only a count (it is public and its warnings are logged; the
+  problems can name people). An intern leaving before the deadline is flagged, not replaced; a
+  Manager or Additional help may be the Doer of a recurring row.
+- **D3, reminders.** Until the part 2 reminder engine, "remind me 7 days before" is `Create days
+  before` = 7: the assignment email then, and the 09:00 digest lists the task every weekday while
+  it is due within 7 days.
+
+**Instant email (D4).** Gmail's push notifications through Pub/Sub:
+- `deploy/setup_gcp.sh` creates the topic `grc-gmail-push` and gives
+  `gmail-api-push@system.gserviceaccount.com` Publisher on it. An organisation enforcing *Domain
+  restricted sharing* can refuse that grant: the script warns, and email is read every 10
+  minutes until IT adds an exception.
+- `deploy/setup_scheduler.sh` creates the push subscription (endpoint `/jobs/gmail-push`, OIDC
+  token of `grc-tracker-scheduler`, audience `SERVICE_URL`, so the app checks it like a Scheduler
+  call), the daily `grc-gmail-watch` job, and runs that job once. `GMAIL_PUSH_TOPIC` (full topic
+  path, written by `deploy/make_env.sh`) turns it on; blank = off.
+- `/jobs/gmail-push` answers 204 at once (Pub/Sub would resend a slow answer) and runs the inbox
+  right after. The notification body (mailbox address, history ID) is not read. A push with
+  nothing unread skips the sheet read; most pushes are the bot's own label changes.
+- Inbox runs never overlap: a push or Scheduler call that finds a run in progress returns at
+  once and makes that run read the inbox once more. A failed push-triggered run is logged; the
+  mail stays unread for the next run (D15).
+- **The 10-minute `/jobs/gmail` stays** as the safety net for a lost push or a lapsed watch.
