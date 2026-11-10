@@ -173,8 +173,12 @@ def client(verifier):
 
 
 @pytest.mark.parametrize(
-    "path", ["/jobs/gmail", "/jobs/changes", "/jobs/recurring", "/jobs/digest"]
-)
+    "path",
+    [
+        "/jobs/gmail", "/jobs/changes", "/jobs/recurring", "/jobs/digest",
+        "/jobs/gmail-push", "/jobs/gmail-watch",
+    ],
+)  # fmt: skip
 def test_jobs_need_scheduler_token(client, path):
     assert client.post(path).status_code == 401
     assert client.post(path, headers={"Authorization": chat_token()}).status_code == 401

@@ -1,18 +1,13 @@
 from datetime import date, datetime, timedelta
 
-import pytest
-
 from app import clock
 from app.extract.ai import NullProvider
 from app.jobs import (
     NO_EMAIL_FLAG,
-    due_dates_within,
-    due_months,
     run_changes,
     run_digest,
-    run_recurring,
 )
-from app.models import CatalogEntry, RawRequest, Task
+from app.models import RawRequest, Task
 from app.pipeline import Services, process_request
 from tests.fakes import FakeDriveStore, FakeGmailClient, FakeSheetsBackend, FakeSheetStore
 
@@ -165,82 +160,6 @@ def test_row_added_by_hand_after_go_live_is_emailed():
     svc.store.append_task(task)
     run = changes(svc, gmail)
     assert run.emailed == 1 and gmail.sent[0][0].to == ["staff.p@example.com"]
-
-
-# --- /jobs/recurring ---------------------------------------------------------------------------
-
-
-def entry(recurrence, months="", day=15):
-    return CatalogEntry.model_validate(
-        {
-            "Catalog ID": "X",
-            "Report type": "Report X",
-            "Recurrence": recurrence,
-            "Due months seen (2026)": months,
-            "Typical due day": day,
-            "Confirmed by manager?": "Yes",
-        }
-    )
-
-
-@pytest.mark.parametrize(
-    ("recurrence", "months", "expected"),
-    [
-        ("Monthly", "Jul", list(range(1, 13))),
-        ("Quarterly", "Jul, Aug, Oct", [7, 8, 10]),
-        ("Quarterly", "", [1, 4, 7, 10]),
-        ("Semester", "", [1, 7]),
-        ("Semester", "Feb, Jul", [2, 7]),
-        ("Annual", "Sep, Jan", [9]),
-        ("Annual", "", []),
-        ("Ad hoc", "Oct", []),
-    ],
-)
-def test_due_months(recurrence, months, expected):
-    assert due_months(entry(recurrence, months)) == expected
-
-
-def test_due_dates_respect_lead_and_cap_month_end():
-    monthly_31 = entry("Monthly", day=31)
-    assert due_dates_within(monthly_31, date(2026, 11, 20), 14) == [date(2026, 11, 30)]
-    assert due_dates_within(entry("Monthly", day=31), date(2027, 2, 10), 30) == [date(2027, 2, 28)]
-    assert due_dates_within(entry("Monthly", day=15), TODAY, 14) == []  # 15 Nov is 20 days away
-    assert due_dates_within(entry("Monthly", day=15), TODAY, 20) == [date(2026, 11, 15)]
-    assert due_dates_within(entry("Annual", "Jan", day=5), date(2026, 12, 28), 14) == [
-        date(2027, 1, 5)
-    ]
-    assert due_dates_within(entry("Monthly", day=""), TODAY, 30) == []
-
-
-def confirm(backend, *catalog_ids):
-    for catalog_id in catalog_ids:
-        set_cell(backend, "Catalog", "Catalog ID", catalog_id, "Confirmed by manager?", "Yes")
-
-
-def test_recurring_creates_once_per_period_for_confirmed_rows_only():
-    backend = FakeSheetsBackend.from_fixtures()
-    confirm(backend, "CMP-TATAKELOLA")  # quarterly, day 29, Jul/Aug/Oct → 29 Oct 2026
-    svc, _ = make(backend)
-    run = run_recurring(svc, TODAY)
-    assert (run.candidates, run.created) == (1, 1)
-    [task] = [t for t in svc.store.tasks() if t.id.startswith("G-")]
-    assert task.source_id == task.source == "Recurring CMP-TATAKELOLA 2026-10"
-    assert task.due_date == date(2026, 10, 29)
-    assert task.catalog_id == "CMP-TATAKELOLA"
-    assert task.owner == "Staff D"
-    assert task.routing_note.startswith('Rule 1: catalog "Corporate governance report')
-    assert task.title.startswith("Corporate governance report")
-    assert task.status == "Proposed"
-
-    again = run_recurring(svc, TODAY)
-    assert (again.created, again.existing) == (0, 1)
-
-
-def test_recurring_ignores_unconfirmed_and_adhoc():
-    backend = FakeSheetsBackend.from_fixtures()
-    confirm(backend, "ADHOC-CMP")
-    svc, _ = make(backend)
-    assert run_recurring(svc, TODAY).candidates == 0
 
 
 # --- /jobs/digest ------------------------------------------------------------------------------

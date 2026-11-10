@@ -9,6 +9,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from app import clock
 from app.drive import Folder, folder_url
 from app.extract.ai import NotConfigured
 from app.models import WA_PENDING_COLUMNS, AIResult, Attachment, CatalogEntry
@@ -283,6 +284,7 @@ class FakeGmailClient:
         self.fail_reply = False
         self.auth_broken = False
         self.stored: dict[str, list[Attachment]] = {}  # task ID -> files kept (GRC/Files)
+        self.watched: list[str] = []  # Pub/Sub topics passed to watch()
 
     def add(self, message_id: str, labels: tuple[str, ...] = ("INBOX", "UNREAD"), **message: Any):
         values = {
@@ -364,6 +366,11 @@ class FakeGmailClient:
             if mid != source_id and task_id in message.subject:
                 files += list(message.attachments)
         return [*files, *self.stored.get(task_id, [])]
+
+    def watch(self, topic: str) -> datetime | None:
+        self._check()
+        self.watched.append(topic)
+        return datetime(2026, 11, 16, 9, 0, tzinfo=clock.TZ)
 
 
 class FakeChatClient:

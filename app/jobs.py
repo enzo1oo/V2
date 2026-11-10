@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import calendar
 import logging
-import re
 from datetime import date, datetime, timedelta
 
 from pydantic import BaseModel
 
-from app import clock
+from app import clock, recurring
 from app.gmail import GmailAuthError, GmailClient
 from app.models import (
     OPEN_STATUSES,
@@ -17,7 +15,7 @@ from app.models import (
     AuditEntry,
     CatalogEntry,
     OutgoingEmail,
-    RawRequest,
+    RecurringRule,
     StaffMember,
     StateRow,
     Task,
@@ -30,7 +28,7 @@ from app.notify import (
     task_line,
     with_files,
 )
-from app.pipeline import SERVICE_USER, Services, process_request
+from app.pipeline import SERVICE_USER, Services
 from app.route import find_person, load_ratio
 from app.sheets import SchemaError, SheetStore
 
@@ -200,94 +198,120 @@ def _audit(store: SheetStore, task_id: str, action: str, field: str, value: str)
         )
 
 
-# --- /jobs/recurring ---------------------------------------------------------------------------
-
-_MONTHS = {name: i for i, name in enumerate(calendar.month_abbr) if name}
-_DEFAULT_MONTHS = {"Quarterly": [1, 4, 7, 10], "Semester": [1, 7]}
-
-
-def due_months(entry: CatalogEntry) -> list[int]:
-    """Months a recurring report falls due (section 7); empty when it cannot be worked out."""
-    listed = [
-        _MONTHS[word[:3].title()]
-        for word in re.findall(r"[A-Za-z]+", entry.due_months_seen)
-        if word[:3].title() in _MONTHS
-    ]
-    recurrence = entry.recurrence.strip()
-    if recurrence == "Monthly":
-        return list(range(1, 13))
-    if recurrence in _DEFAULT_MONTHS:
-        return sorted(set(listed)) or _DEFAULT_MONTHS[recurrence]
-    if recurrence == "Annual":
-        return listed[:1]
-    return []
-
-
-def due_dates_within(entry: CatalogEntry, today: date, lead_days: int) -> list[date]:
-    """Due dates in [today, today + lead] for a recurring report; the day is capped at month end."""
-    try:
-        day = int(float(entry.typical_due_day))
-    except ValueError:
-        return []
-    months = due_months(entry)
-    if day < 1 or not months:
-        return []
-    end = today + timedelta(days=lead_days)
-    found = []
-    year, month = today.year, today.month
-    while date(year, month, 1) <= end:
-        if month in months:
-            due = date(year, month, min(day, calendar.monthrange(year, month)[1]))
-            if today <= due <= end:
-                found.append(due)
-        year, month = (year + 1, 1) if month == 12 else (year, month + 1)
-    return found
+# --- /jobs/recurring (v1.4 part 3: the Recurring tab, DESIGN section 20) ----------------------
 
 
 class RecurringRun(BaseModel):
-    candidates: int = 0
+    rules: int = 0
     created: int = 0
     existing: int = 0
+    skipped: int = 0  # rows that could not be used (named in /health and the manager digest)
     failed: int = 0
 
 
-def recurring_request(entry: CatalogEntry, due: date) -> RawRequest:
-    return RawRequest(
-        source="Recurring",
-        source_id=f"Recurring {entry.catalog_id} {due:%Y-%m}",
-        received_at=clock.now(),
-        subject=entry.report_type,
-        body_text=(
-            f"{entry.report_type} – {due:%b %Y}\n\n"
-            f"Recurring report ({entry.recurrence}) for {entry.regulator or 'n/a'}, "
-            f"due {due:%d %B %Y}."
-        ),
-        catalog_id=entry.catalog_id,
+def recurring_problems(store: SheetStore, today: date) -> list[str]:
+    """Why Recurring rows cannot be used today: bad cells, unknown repeat, people not in Staff.
+    For /health warnings, the manager digest and the `recurring` command."""
+    rules, problems = store.recurring()
+    staff = store.staff()
+    for rule in rules:
+        if not rule.is_active:
+            continue
+        reason = recurring.problem(rule)
+        if reason is None:
+            nxt = recurring.next_occurrence(rule.first_due, recurring.repeat_of(rule.repeat), today)
+            who = recurring.assignee(rule, staff, nxt.due if nxt else today, today)
+            reason = who if isinstance(who, str) else None
+        if reason:
+            problems.append(f"Recurring {rule.name.strip()}: {reason}")
+    return problems
+
+
+def recurring_task(
+    rule: RecurringRule,
+    occurrence: recurring.Occurrence,
+    who: recurring.Assignee,
+    catalog: list[CatalogEntry],
+    staff: list[StaffMember],
+    today: date,
+) -> Task:
+    """The Master row for one deadline: already approved (`Not Started`, decision 2), so the
+    change job emails the Doer the assignment on its next run."""
+    repeat = recurring.repeat_of(rule.repeat) or rule.repeat
+    wanted = rule.catalog_id.strip().casefold()
+    entry = next((e for e in catalog if wanted and e.catalog_id.strip().casefold() == wanted), None)
+    doer = find_person(who.doer, staff)
+    division = entry.division if entry else next(iter(doer.division_list if doer else []), "")
+    key = recurring.source_id(rule.name, occurrence)
+    flags = list(who.flags)
+    if rule.catalog_id.strip() and entry is None:
+        flags.append(f"Catalog ID {rule.catalog_id.strip()} not in Catalog")
+    moved = occurrence.due != occurrence.nominal
+    when = f"due {occurrence.due:%a %d %b %Y}"
+    if moved:
+        when += f" (moved from {occurrence.nominal:%a %d %b %Y}, a weekend)"
+    return Task(
+        title=recurring.title_for(rule.title, repeat, occurrence.nominal, rule.title_period),
+        catalog_id=entry.catalog_id if entry else "",
+        division=division,
+        requester=entry.regulator if entry else "",
+        owner=who.owner,
+        doer=who.doer,
+        start=today,
+        due_date=occurrence.due,
+        status="Not Started",
+        last_updated=clock.now(),
+        notes=rule.notes.strip(),
+        flag="; ".join(flags),
+        source=key,
+        routing_note=f"Recurring tab row {rule.name.strip()} ({repeat}): set up by the team",
+        original_message=f"Recurring task from the Recurring tab, row {rule.name.strip()} "
+        f"({repeat}), {when}.",
+        source_id=key,
+        needs_review="Yes" if rule.needs_review.strip().lower() in {"yes", "y", "ya"} else "",
+        reviewer=rule.reviewer.strip(),
     )
 
 
 def run_recurring(services: Services, today: date | None = None) -> RecurringRun:
-    """Create confirmed Catalog reports due within the lead time, once per period."""
+    """Create each Recurring row's task once per deadline, `Create days before` the deadline
+    (blank: Config `Recurring lead (days)`). Rows that cannot be used are skipped and named."""
     today = today or clock.today()
-    config = services.store.config()
-    run = RecurringRun()
-    for entry in services.store.catalog():
-        if entry.is_adhoc or not entry.confirmed:
+    store = services.store
+    rules, problems = store.recurring()
+    run = RecurringRun(rules=len(rules), skipped=len(problems))
+    config = store.config()
+    staff = store.staff()
+    catalog = store.catalog()
+    for rule in rules:
+        if not rule.is_active:
             continue
-        for due in due_dates_within(entry, today, config.recurring_lead_days):
-            run.candidates += 1
+        if recurring.problem(rule) is not None or rule.first_due is None:
+            run.skipped += 1
+            continue
+        repeat = recurring.repeat_of(rule.repeat) or ""
+        lead = rule.create_days_before
+        lead = config.recurring_lead_days if lead is None else lead
+        for occurrence in recurring.to_create(rule.first_due, repeat, lead, today):
+            who = recurring.assignee(rule, staff, occurrence.due, today)
+            if isinstance(who, str):
+                run.skipped += 1
+                break
+            task = recurring_task(rule, occurrence, who, catalog, staff, today)
             try:
-                result = process_request(recurring_request(entry, due), services, today=today)
+                saved, created = store.append_task(task)
             except SchemaError:
                 raise
             except Exception as error:
-                run.failed += 1
+                run.failed += 1  # retried on the next daily run: the Source ID dedupes it
                 logger.error("recurring_failed", extra={"error_type": type(error).__name__})
                 continue
-            if result.created:
-                run.created += 1
-            else:
+            if not created:
                 run.existing += 1
+                continue
+            run.created += 1
+            _audit(store, saved.id, "Created", "Source", saved.source_id)
+            logger.info("task_created", extra={"task_id": saved.id, "rule": "recurring"})
     logger.info("recurring_run", extra=_log_counts(run))
     return run
 
@@ -386,6 +410,10 @@ def run_digest(
         ),
         ("Interns leaving who still own Catalog reports", leaving),
         ("AI unavailable (last 24 h)", [f"{ai_down} request(s)"] if ai_down else []),
+        (
+            "Recurring rows skipped (fix them in the Recurring tab)",
+            recurring_problems(store, today),
+        ),
     ]
     email = manager_digest(config.manager_email.strip(), sections, sheet_url, label)
     if email is not None:

@@ -1,13 +1,12 @@
 """Failure paths: a request is never lost and one failure never stops a whole job."""
 
-from datetime import date
 from unittest.mock import MagicMock
 
 import pytest
 
 from app import clock
 from app.extract.ai import NullProvider
-from app.jobs import run_changes, run_digest, run_recurring
+from app.jobs import run_changes, run_digest
 from app.models import AppConfig, RawRequest
 from app.pipeline import Services, process_request
 from app.sheets import GoogleSheetsBackend, SchemaError
@@ -106,44 +105,6 @@ def test_digest_send_failure_continues_with_others():
     run = run_digest(svc.store, gmail, SHEET)
     assert run.failed == 1
     assert ["staff.g@example.com"] in sent
-
-
-def test_recurring_failure_counts_and_continues(monkeypatch):
-    backend = FakeSheetsBackend.from_fixtures()
-    rows = backend.tabs["Catalog"]
-    for row in rows[1:]:
-        if row[0] in {"CMP-TATAKELOLA", "CMP-HEALTH"}:
-            row[rows[0].index("Confirmed by manager?")] = "Yes"
-            row[rows[0].index("Recurrence")] = "Monthly"
-    svc = make(backend)
-    calls = []
-
-    def flaky(request, services, today=None):
-        calls.append(request.catalog_id)
-        if request.catalog_id == "CMP-TATAKELOLA":
-            raise OSError("drive")
-        return process_request(request, services, today=today)
-
-    monkeypatch.setattr("app.jobs.process_request", flaky)
-    run = run_recurring(svc, date(2026, 10, 26))
-    assert run.failed == 1 and run.created == 1
-    assert set(calls) == {"CMP-TATAKELOLA", "CMP-HEALTH"}
-
-
-def test_recurring_schema_error_stops(monkeypatch):
-    backend = FakeSheetsBackend.from_fixtures()
-    rows = backend.tabs["Catalog"]
-    for row in rows[1:]:
-        if row[0] == "CMP-TATAKELOLA":
-            row[rows[0].index("Confirmed by manager?")] = "Yes"
-    svc = make(backend)
-
-    def broken(*args, **kwargs):
-        raise SchemaError(["x"])
-
-    monkeypatch.setattr("app.jobs.process_request", broken)
-    with pytest.raises(SchemaError):
-        run_recurring(svc, date(2026, 10, 26))
 
 
 # --- Config values as Sheets returns them ------------------------------------------------------

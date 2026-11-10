@@ -16,7 +16,9 @@ Email to the bot mailbox ─┐                         ┌─> Master row (stat
 Google Chat message ──────┘   clean · rules · (AI)  └─> Drive folder "G-0012 – <title>"
                               · route · write
 Manager sets Status ──> /jobs/changes (every 5 min) ──> assignment email to the Doer
-Cloud Scheduler ──> /jobs/recurring (07:00) · /jobs/digest (weekdays 09:00) · /jobs/gmail (10 min)
+New mail ──> Gmail push (Pub/Sub) ──> /jobs/gmail-push: logged within about a minute
+Cloud Scheduler ──> /jobs/gmail (10 min, safety net) · /jobs/recurring (07:00, Recurring tab)
+                    · /jobs/digest (weekdays 09:00) · /jobs/gmail-watch (daily)
 Hand edits in Master ──> Apps Script trigger ──> AuditLog, Last updated, "Done needs proof"
 ```
 
@@ -27,7 +29,8 @@ Hand edits in Master ──> Apps Script trigger ──> AuditLog, Last updated,
 | `app/extract/` | cleaning, rule extraction, AI providers (`ai.py`) |
 | `app/route.py` | routing rules 1–5 |
 | `app/sheets.py`, `app/drive.py`, `app/gmail.py`, `app/chat.py` | Google APIs behind small classes |
-| `app/jobs.py` | change detection, recurring reports, digests |
+| `app/jobs.py` | change detection, recurring tasks, digests |
+| `app/recurring.py` | Recurring tab schedule: deadlines, titles, who owns them (pure) |
 | `app/auth.py`, `app/logs.py`, `app/alerts.py` | token checks, JSON logs, alert emails |
 | `apps_script/audit.gs` | edit trigger for the sheet (installed by hand, step 10) |
 | `scripts/mint_gmail_token.py` | one-time Gmail consent for the intake mailbox |
@@ -93,6 +96,9 @@ python scripts/smoke_gemini.py
 
 ## Deploy to Cloud Run
 
+**Installing in a new project (IT handover): follow [`docs/SETUP_GUIDE.md`](docs/SETUP_GUIDE.md)**,
+which walks through every step below in order, with the usual problems and their fixes.
+
 Everything runs from Cloud Shell (or any machine with `gcloud`), in the repo folder, with the
 project selected (`gcloud config set project YOUR-PROJECT-ID`). Names (service `v2-git`, region
 `asia-southeast2`, accounts `grc-tracker-run` and `grc-tracker-scheduler`) live in
@@ -108,10 +114,11 @@ deploy/setup_gcp.sh
 ```bash
 deploy/setup_secrets.sh
 ```
-3. **Production settings.** Copy the example, fill in the values (none are secret), and store it
-   as the secret `grc-env-prod` that every deploy reads:
+3. **Production settings.** `deploy/make_env.sh` writes `deploy/env.prod.yaml` from the project
+   (it asks only for the Sheet ID; or copy `deploy/env.prod.yaml.example` and fill it in by hand).
+   None of it is secret. Store it as the secret `grc-env-prod` that every deploy reads:
 ```bash
-cp deploy/env.prod.yaml.example deploy/env.prod.yaml
+deploy/make_env.sh
 ```
 ```bash
 deploy/setup_secrets.sh env
@@ -161,8 +168,8 @@ one alert. Against `GRC_Tracker_Tabs_v2.xlsx` that means:
 - [ ] Master: add columns `Original message`, `Files`, `AI summary`, `Deliverables`, `Contacts`,
       `Source ID` (at the right, so the Staff formulas keep working). Keep one data row with the
       `Weight` formula; delete the `[EXAMPLE]` rows only after the first real task exists.
-- [ ] Catalog: add `Known contacts`; set `Confirmed by manager?` = Yes on the reports that should
-      be created automatically (none are today, so `/jobs/recurring` creates nothing).
+- [ ] Catalog: add `Known contacts`. (Catalog rows no longer create recurring tasks: use the
+      Recurring tab, section 1c.)
 - [ ] Staff: fill `Email` for everyone (no email = no assignment emails), `Role` (blank counts as
       Staff, so mark the manager **Manager**), and interns' `Internship end date`.
 - [ ] Config: fill `Manager email`, `Allowed email domain` (blank = the Chat bot refuses
@@ -201,6 +208,25 @@ one alert. Against `GRC_Tracker_Tabs_v2.xlsx` that means:
       `return G-0012 <notes>`, `assign G-0012 to <name>` (or reply `assign that to <name>`);
       manager: `semua`, `pause <name>`, `resume <name>`. Files are kept in the bot mailbox
       (label `GRC/Files`); there is no Drive.
+
+### 1c. Recurring tab (DESIGN section 20)
+- [ ] Add a tab **`Recurring`** with these headers: `Name`, `Active`, `Title`, `Repeat`,
+      `First due date`, `Title period`, `Create days before`, `Owner`, `Doer`, `Needs review`,
+      `Reviewer`, `Catalog ID`, `Notes`. One row per repeating task, for example:
+      `Q report` · `Yes` · `Q{Q} {YYYY} report` · `Quarterly` · `15/10/2026` · *(blank)* · `7` ·
+      `<owner>` · `<doer>` · `Yes` · *(blank)* · *(blank)* · *(blank)*.
+      - `Repeat`: `Weekly`, `Monthly`, `Quarterly`, `Semester` or `Annual`.
+      - `First due date`: the first deadline; later ones keep its day of the month. Weekend
+        deadlines become the Friday before.
+      - `Title`: `{Q}` quarter, `{S}` half-year, `{M}` month number, `{MMM}` month name, `{YYYY}`
+        year, for the period **before** the deadline (`Title period` = `Same` for the deadline's
+        own period).
+      - `Create days before`: the task is created and emailed that many days before each
+        deadline (blank = Config `Recurring lead (days)`).
+      - `Owner` may be blank when the Doer reports to someone; `Active` = `No` pauses a row.
+      - Never rename `Name` once tasks exist: it keeps each deadline from being created twice.
+- [ ] Check with the bot: the manager sends `recurring` (WhatsApp, or the first line of an email
+      reply) to see every row's next deadline and any row that cannot be used.
 
 ### 2. Google Cloud project and APIs
 - [ ] Done by `deploy/setup_gcp.sh` (APIs, Artifact Registry `cloud-run-source-deploy`, Cloud Tasks
@@ -297,8 +323,14 @@ curl https://v2-git-1085688466076.asia-southeast2.run.app/health
 - [ ] `deploy/setup_scheduler.sh` creates or updates: `grc-gmail` (every 10 min), `grc-changes`
       (every 5 min, 08:00–19:55), `grc-recurring` (daily 07:00), `grc-digest` (weekdays 09:00),
       `grc-wa-reminders` (weekdays every 30 min, 07:00–19:30; the app sends once after Config
-      `Reminder time`) and `grc-wa-drafts` (every 10 min). Each sends an OIDC token of
-      `grc-tracker-scheduler` whose audience is `SERVICE_URL`.
+      `Reminder time`), `grc-wa-drafts` (every 10 min) and `grc-gmail-watch` (daily 06:23).
+      Each sends an OIDC token of `grc-tracker-scheduler` whose audience is `SERVICE_URL`.
+- [ ] **Instant email** (DESIGN section 20): the same script creates the Pub/Sub push
+      subscription `grc-gmail-push` (to `/jobs/gmail-push`) and starts Gmail's push at once.
+      Needs `GMAIL_PUSH_TOPIC` in `deploy/env.prod.yaml` (`deploy/make_env.sh` fills it). If
+      `deploy/setup_gcp.sh` warned that Gmail may not publish to the topic, the organisation
+      policy *Domain restricted sharing* blocks it: IT adds an exception for
+      `gmail-api-push@system.gserviceaccount.com`, then run `deploy/setup_gcp.sh` again.
 
 ### 9. Google Chat app
 In the Cloud console → Google Chat API → Configuration:

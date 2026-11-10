@@ -17,7 +17,7 @@ from datetime import date, datetime, timedelta
 from html import escape
 from typing import Any, Literal
 
-from app import clock
+from app import clock, recurring
 from app.commands import Command, is_me, progress_fraction
 from app.gmail import GmailAuthError, GmailClient
 from app.models import (
@@ -263,6 +263,35 @@ def _sorted(tasks: list[Task]) -> list[Task]:
     return sorted(tasks, key=lambda t: (t.due_date is None, t.due_date or date.max, t.id))
 
 
+def recurring_reply(store: SheetStore, today: date) -> str:
+    """The `recurring` command (v1.4 decision 13): every row with its next deadline, and the
+    rows that cannot be used."""
+    from app.jobs import recurring_problems
+
+    rules, _ = store.recurring()
+    lines = []
+    for rule in rules:
+        repeat = recurring.repeat_of(rule.repeat)
+        if not rule.is_active:
+            lines.append(f"• {rule.name}: paused (Active = No)")
+            continue
+        if repeat is None or rule.first_due is None:
+            continue  # listed below as a problem
+        nxt = recurring.next_occurrence(rule.first_due, repeat, today)
+        if nxt is None:
+            continue
+        title = recurring.title_for(rule.title, repeat, nxt.nominal, rule.title_period)
+        lines.append(f"• {rule.name} ({repeat}): next {title}, due {nxt.due:%a %d %b %Y}, "
+                     f"Doer {rule.doer.strip()}")  # fmt: skip
+    problems = recurring_problems(store, today)
+    if not lines and not problems:
+        return "The Recurring tab has no rows."
+    parts = ["Recurring tasks:", *lines] if lines else []
+    if problems:
+        parts += ["", "Not used until fixed:", *(f"• {p}" for p in problems)]
+    return "\n".join(parts).strip()
+
+
 def _list_reply(title: str, tasks: list[Task]) -> str:
     if not tasks:
         return f"{title}: nothing."
@@ -320,7 +349,7 @@ def _run(command: Command, ctx: CommandContext) -> CommandResult:
             parts = [_list_reply(name, items) for name, items in sorted(by_doer.items())]
             return CommandResult("\n\n".join(parts))
         if command.name == "recurring":
-            return CommandResult("The recurring list comes with the Recurring tab (next update).")
+            return CommandResult(recurring_reply(store, today))
         person = match_staff_name(command.value, staff)
         if person is None:
             return CommandResult(f'I can\'t find "{command.value}" in Staff. Nothing changed.')

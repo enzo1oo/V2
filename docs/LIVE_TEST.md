@@ -67,3 +67,16 @@ Set up Staff roles first (README §1b). Use a test task that is approved (`Not S
 | C7 | `files G-…` on WhatsApp. | Reply lists the files; they arrive by email. |
 | C8 | Manager: `pause <name>`, then assign them a task. | No email until `resume <name>`. |
 
+
+## Instant email and the Recurring tab (DESIGN section 20)
+
+| # | Do this | Expected |
+|---|---------|----------|
+| P1 | After `deploy/setup_scheduler.sh`, read the log for `gmail_watch`. | One `gmail_watch` line (not `gmail_watch_failed`). |
+| P2 | Send the bot a new request (test 1's text, new subject). Do **not** run the Gmail job. | Within about a minute: the `Proposed` row and the reply in the thread. |
+| P3 | Send two requests a few seconds apart. | Both logged once each; no duplicate rows. |
+| R1 | Recurring row: `R test` · `Yes` · `Test Q{Q} {YYYY}` · `Quarterly` · a deadline **5 days from today** · *(blank)* · `7` · a full-timer · the same person. Then Cloud Scheduler > `grc-recurring` > **Force run**. | A `Not Started` row titled for the previous quarter, Source `Recurring R test <date>`. Within 5 minutes (08:00–19:55) the Doer gets the assignment email. |
+| R2 | Force run `grc-recurring` again. | No second row. |
+| R3 | Change the deadline to a Saturday 5 days away; rename the row `R test 2`; force run. | The row's `Due date` is the Friday before; its Original message says "moved from Sat …". |
+| R4 | Set the row's Doer to a name not in Staff; as the manager send `recurring`. | The reply lists the row under "Not used until fixed"; `/health` warns `Recurring: 1 row(s) cannot be used`. |
+| R5 | Clean up: set the test rows' `Active` to `No` and cancel the test tasks. | — |

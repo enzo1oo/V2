@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     scheduler_sa_email: str = ""
     runtime_sa_email: str = ""  # Cloud Tasks calls /tasks/* as this account
     chat_project_number: str = ""  # audience of Google Chat tokens
+    # v1.4: Pub/Sub topic Gmail pushes new-mail notes to (projects/<p>/topics/grc-gmail-push).
+    # Blank: no push, the 10-minute Gmail job alone (DESIGN section 20).
+    gmail_push_topic: str = ""
     # WhatsApp (not secret)
     wa_phone_number_id: str = ""
     wa_waba_id: str = ""

@@ -123,6 +123,11 @@ class GmailClient(Protocol):
         (`source_id`), messages whose subject names the task, and the stored copies."""
         ...
 
+    def watch(self, topic: str) -> datetime | None:
+        """Ask Gmail to publish a note to the Pub/Sub `topic` whenever the Inbox changes
+        (DESIGN section 20). Lasts 7 days; returns when it expires."""
+        ...
+
 
 # --- Parsing (pure) ----------------------------------------------------------------------------
 
@@ -380,6 +385,14 @@ class GoogleGmailClient:
             self._users().messages().insert(userId="me", body={"raw": raw, "labelIds": [label]})
         )
 
+    def watch(self, topic: str) -> datetime | None:
+        body = {"topicName": topic, "labelIds": [INBOX], "labelFilterBehavior": "include"}
+        response = self._execute(self._users().watch(userId="me", body=body))
+        expiration = response.get("expiration")
+        if not expiration:
+            return None
+        return datetime.fromtimestamp(int(expiration) / 1000, tz=clock.TZ)
+
     def task_files(self, task_id: str, source_id: str = "") -> list[Attachment]:
         query = f'subject:"{task_id}" has:attachment'
         found = self._execute(
@@ -549,6 +562,33 @@ def _email_command(
     _modify(gmail, message.id, [COMMAND_LABEL], [UNREAD, INBOX])
     logger.info("email_command", extra={"kind": command.name, "n_changed": int(result.changed)})
     return True
+
+
+class OneRunAtATime:
+    """Inbox runs never overlap (a push and the 10-minute job could arrive together). A call
+    that finds a run in progress returns None at once and makes that run go round once more,
+    so mail that arrived during it is not left for the next run."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._again = threading.Event()
+
+    def run[Result](self, work: Callable[[], Result]) -> Result | None:
+        result: Result | None = None
+        while True:
+            if not self._lock.acquire(blocking=False):
+                self._again.set()
+                return result
+            try:
+                self._again.clear()
+                result = work()
+            finally:
+                self._lock.release()
+            if not self._again.is_set():
+                return result
+
+
+INBOX_RUNS = OneRunAtATime()
 
 
 def process_inbox(
